@@ -5,6 +5,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 from datetime import datetime
 import uuid
+import json
+import os
+import hashlib
+from pathlib import Path
 from collections import Counter
 
 # =========================================================
@@ -67,7 +71,6 @@ st.markdown("""
     .pill-warn { background: #fef3c7; color: #92400e; }
     .pill-fail { background: #fee2e2; color: #991b1b; }
     .pill-info { background: #dbeafe; color: #1e40af; }
-    .pill-idle { background: #f3f4f6; color: #6b7280; }
     [data-testid="stMetricDelta"] svg { display: none; }
     .step-row {
         display: flex; align-items: center; gap: 8px;
@@ -79,8 +82,107 @@ st.markdown("""
     }
     .dot-ok { background: #047857; }
     .dot-idle { background: #d1d5db; }
+    /* Login page */
+    .login-hero {
+        max-width: 480px;
+        margin: 60px auto;
+        padding: 40px;
+        background: #ffffff;
+        border: 1px solid #e5e7eb;
+        border-radius: 12px;
+        text-align: center;
+    }
+    .login-hero h1 { font-size: 1.6rem !important; margin-bottom: 8px; }
+    .login-hero p { color: #6b7280; font-size: 0.9rem; margin-bottom: 24px; }
 </style>
 """, unsafe_allow_html=True)
+
+# =========================================================
+# AUTENTIKASI GOOGLE
+# =========================================================
+def check_auth():
+    """Return True kalau user sudah login, else render login page & return False."""
+    if not st.user.is_logged_in:
+        st.markdown("""
+        <div class='login-hero'>
+            <h1>Vendor Selection & Project Control</h1>
+            <p>Masuk dengan akun Google Anda untuk mengakses dashboard project.</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        col1, col2, col3 = st.columns([1, 1, 1])
+        with col2:
+            if st.button("Login dengan Google", use_container_width=True):
+                st.login("google")
+        return False
+
+    return True
+
+
+if not check_auth():
+    st.stop()
+
+# =========================================================
+# USER INFO
+# =========================================================
+user_email = st.user.email
+user_name = st.user.name if hasattr(st.user, "name") else user_email
+user_picture = st.user.picture if hasattr(st.user, "picture") else None
+
+# Hash email untuk nama file (privacy)
+user_hash = hashlib.sha256(user_email.encode()).hexdigest()[:16]
+
+# =========================================================
+# STORAGE — JSON FILE PER USER
+# =========================================================
+DATA_DIR = Path("data")
+DATA_DIR.mkdir(exist_ok=True)
+
+
+def user_file_path():
+    return DATA_DIR / f"{user_hash}.json"
+
+
+def load_user_data():
+    """Load data user dari file JSON. Kalau belum ada, return kosong."""
+    path = user_file_path()
+    if not path.exists():
+        return {"projects": {}, "active_project": None}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        st.error(f"Gagal membaca data user: {e}")
+        return {"projects": {}, "active_project": None}
+
+
+def save_user_data(data):
+    """Simpan data user ke file JSON."""
+    path = user_file_path()
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+    except Exception as e:
+        st.error(f"Gagal menyimpan data user: {e}")
+
+
+# Init session state dengan data user
+if "user_data" not in st.session_state:
+    st.session_state.user_data = load_user_data()
+
+if "projects" not in st.session_state:
+    st.session_state.projects = st.session_state.user_data.get("projects", {})
+
+if "active_project" not in st.session_state:
+    st.session_state.active_project = st.session_state.user_data.get("active_project", None)
+
+
+def persist():
+    """Panggil setelah perubahan untuk simpan ke file."""
+    st.session_state.user_data["projects"] = st.session_state.projects
+    st.session_state.user_data["active_project"] = st.session_state.active_project
+    save_user_data(st.session_state.user_data)
+
 
 # =========================================================
 # HELPER
@@ -90,16 +192,6 @@ def format_rupiah(juta):
     if abs(juta) >= 1000:
         return f"Rp {juta/1000:,.2f} miliar"
     return f"Rp {juta:,.0f} juta"
-
-
-# =========================================================
-# SESSION STATE
-# =========================================================
-if "projects" not in st.session_state:
-    st.session_state.projects = {}
-
-if "active_project" not in st.session_state:
-    st.session_state.active_project = None
 
 
 def create_project(name, client, location, budget, deadline):
@@ -115,8 +207,9 @@ def create_project(name, client, location, budget, deadline):
             "tender": {}, "project_mgmt": {}, "vendor_selection": {},
             "site_execution": {}, "quality_control": {},
         },
-        "wbs_data": None,  # template WBS untuk S-Curve
+        "wbs_data": None,
     }
+    persist()
     return pid
 
 
@@ -145,7 +238,6 @@ def project_progress(project):
     return sum(1 for t in stages if stage_status(project, t)), len(stages)
 
 
-# Template WBS default
 def default_wbs():
     return pd.DataFrame([
         {"No": 1, "Item Pekerjaan": "Persiapan & Mobilisasi",    "Bobot (%)": 5.0,  "Mulai (minggu)": 1,  "Selesai (minggu)": 3,  "Realisasi (%)": 100.0},
@@ -163,6 +255,20 @@ def default_wbs():
 # SIDEBAR
 # =========================================================
 with st.sidebar:
+    # User info + logout
+    st.markdown("### Akun")
+    col_u1, col_u2 = st.columns([1, 3])
+    with col_u1:
+        if user_picture:
+            st.image(user_picture, width=40)
+    with col_u2:
+        st.markdown(f"**{user_name}**")
+        st.caption(user_email)
+
+    if st.button("Logout"):
+        st.logout()
+
+    st.markdown("---")
     st.markdown("### Project Manager")
 
     if st.session_state.projects:
@@ -177,7 +283,10 @@ with st.sidebar:
             index=current_idx,
             format_func=lambda x: st.session_state.projects[x]["meta"]["name"],
         )
-        st.session_state.active_project = selected
+        if selected != st.session_state.active_project:
+            st.session_state.active_project = selected
+            persist()
+            st.rerun()
     else:
         st.info("Belum ada project. Tambahkan di bawah.")
 
@@ -193,10 +302,7 @@ with st.sidebar:
             min_value=10.0, value=300.0, step=10.0,
             help="Nilai dalam juta Rupiah. Contoh: 300 berarti Rp 300.000.000."
         )
-        new_deadline = st.number_input(
-            "Deadline project (hari)",
-            min_value=1, value=90, step=5
-        )
+        new_deadline = st.number_input("Deadline project (hari)", min_value=1, value=90, step=5)
         submitted = st.form_submit_button("Tambah Project")
         if submitted:
             if new_name.strip():
@@ -208,6 +314,7 @@ with st.sidebar:
                     new_deadline,
                 )
                 st.session_state.active_project = pid
+                persist()
                 st.rerun()
             else:
                 st.error("Nama project wajib diisi.")
@@ -238,8 +345,6 @@ with st.sidebar:
 
         st.markdown("---")
         st.markdown("**Budget & Deadline Project**")
-        st.caption("Perubahan di sini langsung mempengaruhi validasi vendor.")
-
         new_budget_edit = st.number_input(
             "Budget project (juta Rp)",
             min_value=10.0,
@@ -259,6 +364,7 @@ with st.sidebar:
                 or new_deadline_edit != active["meta"]["deadline"]):
             active["meta"]["budget"] = float(new_budget_edit)
             active["meta"]["deadline"] = int(new_deadline_edit)
+            persist()
             st.rerun()
 
         st.markdown("---")
@@ -268,6 +374,7 @@ with st.sidebar:
                 list(st.session_state.projects.keys())[0]
                 if st.session_state.projects else None
             )
+            persist()
             st.rerun()
     else:
         min_quality, min_hse, require_technical = 82, 85, True
@@ -294,7 +401,7 @@ with col_status:
     st.markdown(
         f"<div style='text-align:right; padding-top:12px;'>"
         f"<span class='pill pill-info'>{total_projects} project</span><br>"
-        f"<span style='color:#6b7280; font-size:0.75rem;'>Multi-project workspace</span>"
+        f"<span style='color:#6b7280; font-size:0.75rem;'>Tersimpan di akun Anda</span>"
         f"</div>",
         unsafe_allow_html=True,
     )
@@ -302,7 +409,7 @@ with col_status:
 st.markdown("---")
 
 # =========================================================
-# VENDOR DATA
+# VENDOR DATA DEFAULT
 # =========================================================
 DEFAULT_VENDORS = pd.DataFrame([
     {"Vendor": "PT Baja Nusantara Konstruksi", "Harga (juta Rp)": 285.0, "Kualitas (0-100)": 91,
@@ -348,7 +455,7 @@ if active is None:
             st.info(msg)
     with tab7:
         st.markdown("## Portfolio")
-        st.info("Belum ada project.")
+        st.info("Belum ada project. Tambahkan project baru dari sidebar.")
     st.stop()
 
 live_data = active["live_data"]
@@ -393,20 +500,15 @@ with tab1:
 
         with col2:
             st.markdown("#### RAB Awal")
-            st.caption("Nilai dalam juta Rupiah. Contoh: 300 berarti Rp 300.000.000.")
             rab_awal_input = st.number_input(
-                "Nilai RAB (juta Rp)",
-                min_value=10.0,
+                "Nilai RAB (juta Rp)", min_value=10.0,
                 value=float(meta.get("rab_awal", meta.get("budget", 300.0))),
-                step=10.0,
-                key=f"rab_awal_{meta['id']}",
+                step=10.0, key=f"rab_awal_{meta['id']}",
             )
             budget_input = st.number_input(
-                "Budget approved (juta Rp)",
-                min_value=10.0,
+                "Budget approved (juta Rp)", min_value=10.0,
                 value=float(meta.get("budget", 300.0)),
-                step=10.0,
-                key=f"budget_tender_{meta['id']}",
+                step=10.0, key=f"budget_tender_{meta['id']}",
             )
             variance_preview = budget_input - rab_awal_input
             st.metric("Selisih terhadap RAB", format_rupiah(variance_preview))
@@ -434,7 +536,7 @@ with tab1:
 
         if submitted:
             if not (dokumen_lengkap and catatan_lengkap and timeline_valid):
-                st.error("Data belum lengkap. Perbaiki dulu sesuai pesan di atas.")
+                st.error("Data belum lengkap.")
             else:
                 meta["budget"] = float(budget_input)
                 meta["rab_awal"] = float(rab_awal_input)
@@ -456,6 +558,7 @@ with tab1:
                     "catatan": catatan,
                 }
                 live_data["tender"] = payload
+                persist()
                 st.success("Data Tender tersimpan.")
                 st.rerun()
 
@@ -547,7 +650,7 @@ with tab2:
 
         if submitted:
             if not form_valid:
-                st.error("Data belum lengkap. Perbaiki dulu sesuai pesan di atas.")
+                st.error("Data belum lengkap.")
             else:
                 payload = {
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -560,6 +663,7 @@ with tab2:
                     "progress_pct": progress_pct,
                 }
                 live_data["project_mgmt"] = payload
+                persist()
                 st.success("Data Project Management tersimpan.")
                 st.rerun()
 
@@ -684,7 +788,7 @@ with tab3:
                 if eligible.empty:
                     st.error("Tidak ada vendor yang memenuhi seluruh kriteria.")
 
-                    st.markdown("#### Diagnostik — alasan terbanyak gagal")
+                    st.markdown("#### Diagnostik")
                     all_reasons = []
                     for _, r in data.iterrows():
                         if r["Alasan"]:
@@ -696,26 +800,6 @@ with tab3:
                          for k, v in reason_count.most_common()]
                     )
                     st.dataframe(diag_df, use_container_width=True, hide_index=True)
-
-                    st.markdown("#### Vendor yang hampir lolos")
-                    near_miss = []
-                    for _, r in data.iterrows():
-                        parts = [x.strip() for x in r["Alasan"].split("·") if x.strip()]
-                        if len(parts) == 1:
-                            near_miss.append({
-                                "Vendor": r["Vendor"],
-                                "Harga": format_rupiah(r["Harga (juta Rp)"]),
-                                "Kualitas": r["Kualitas (0-100)"],
-                                "K3": r["Skor K3 (0-100)"],
-                                "Durasi (hari)": r["Durasi (hari)"],
-                                "Alasan gagal": parts[0],
-                            })
-                    if near_miss:
-                        st.dataframe(pd.DataFrame(near_miss),
-                                     use_container_width=True, hide_index=True)
-                        st.caption("Vendor ini hanya gagal di 1 kriteria.")
-                    else:
-                        st.caption("Tidak ada vendor yang tinggal gagal di 1 kriteria.")
 
                     st.markdown("#### Saran tindak lanjut")
                     saran = []
@@ -832,11 +916,12 @@ with tab3:
                                         "kontrak_status": kontrak_status,
                                     }
                                     live_data["vendor_selection"] = payload
+                                    persist()
                                     st.success("Keputusan Vendor Selection tersimpan.")
                                     st.rerun()
 
 # =========================================================
-# TAB 4 — SITE EXECUTION (dengan template S-Curve)
+# TAB 4 — SITE EXECUTION
 # =========================================================
 with tab4:
     st.markdown("## Tahap 4 — Site Execution")
@@ -850,21 +935,20 @@ with tab4:
 
         st.caption(f"Kontraktor terpilih: {selected_vendor} · Durasi kontrak: {selected_duration} hari")
 
-        # =========================================================
-        # TEMPLATE S-CURVE
-        # =========================================================
         st.markdown("### Template S-Curve Proyek")
         st.caption(
-            "Isi tabel WBS di bawah sesuai pekerjaan proyek. "
-            "Sistem akan menghitung S-Curve rencana vs realisasi secara otomatis."
+            "Isi tabel WBS sesuai pekerjaan proyek. "
+            "Sistem akan menghitung S-Curve rencana vs realisasi otomatis."
         )
 
-        # Init WBS dari project (kalau belum ada pakai default)
-        if active["wbs_data"] is None:
-            active["wbs_data"] = default_wbs()
+        # Load WBS dari project kalau ada
+        if active.get("wbs_data") is None:
+            active["wbs_data"] = default_wbs().to_dict("records")
+            persist()
 
+        wbs_df = pd.DataFrame(active["wbs_data"])
         wbs_edited = st.data_editor(
-            active["wbs_data"],
+            wbs_df,
             use_container_width=True,
             hide_index=True,
             num_rows="dynamic",
@@ -875,8 +959,7 @@ with tab4:
                     "Item Pekerjaan", required=True, width="large"
                 ),
                 "Bobot (%)": st.column_config.NumberColumn(
-                    "Bobot (%)", min_value=0.0, max_value=100.0, step=0.5, format="%.1f",
-                    help="Bobot item terhadap total proyek. Total semua = 100%."
+                    "Bobot (%)", min_value=0.0, max_value=100.0, step=0.5, format="%.1f"
                 ),
                 "Mulai (minggu)": st.column_config.NumberColumn(
                     "Mulai (minggu)", min_value=1, step=1, width="small"
@@ -885,15 +968,17 @@ with tab4:
                     "Selesai (minggu)", min_value=1, step=1, width="small"
                 ),
                 "Realisasi (%)": st.column_config.NumberColumn(
-                    "Realisasi (%)", min_value=0.0, max_value=100.0, step=1.0, format="%.1f",
-                    help="Progress aktual item ini. 0% = belum, 100% = selesai."
+                    "Realisasi (%)", min_value=0.0, max_value=100.0, step=1.0, format="%.1f"
                 ),
             },
         )
-        active["wbs_data"] = wbs_edited
+
+        # Simpan WBS
+        active["wbs_data"] = wbs_edited.to_dict("records")
+        persist()
 
         if wbs_edited.empty:
-            st.warning("Tabel WBS kosong. Tambahkan minimal satu item pekerjaan.")
+            st.warning("Tabel WBS kosong.")
         else:
             total_bobot = float(wbs_edited["Bobot (%)"].sum())
             max_week = int(wbs_edited["Selesai (minggu)"].max())
@@ -902,33 +987,24 @@ with tab4:
             c1.metric("Total Bobot", f"{total_bobot:.1f}%",
                       delta=f"{total_bobot - 100:+.1f}%" if abs(total_bobot - 100) > 0.1 else "OK")
             c2.metric("Jumlah Item", len(wbs_edited))
-            c3.metric("Durasi Proyek", f"{max_week} minggu")
+            c3.metric("Durasi", f"{max_week} minggu")
 
             if abs(total_bobot - 100) > 0.1:
-                st.warning(
-                    f"Total bobot = {total_bobot:.1f}%. Sebaiknya tepat 100% supaya "
-                    "kurva merepresentasikan seluruh proyek."
-                )
+                st.warning(f"Total bobot = {total_bobot:.1f}%. Sebaiknya tepat 100%.")
 
-            invalid_rows = wbs_edited[
-                wbs_edited["Mulai (minggu)"] > wbs_edited["Selesai (minggu)"]
-            ]
+            invalid_rows = wbs_edited[wbs_edited["Mulai (minggu)"] > wbs_edited["Selesai (minggu)"]]
             if not invalid_rows.empty:
-                st.error("Ada item dengan 'Mulai' > 'Selesai'. Perbaiki dulu.")
+                st.error("Ada item dengan 'Mulai' > 'Selesai'.")
             else:
-                # Input minggu saat ini
                 current_week = st.number_input(
-                    "Minggu saat ini (untuk menandai posisi progress)",
+                    "Minggu saat ini",
                     min_value=1, max_value=max_week,
                     value=min(max_week, max(1, int(max_week * 0.65))),
-                    step=1,
-                    key=f"current_week_{pid}",
+                    step=1, key=f"current_week_{pid}",
                 )
 
-                # Hitung S-Curve
                 weeks = np.arange(1, max_week + 1)
 
-                # Rencana
                 plan_weekly = np.zeros(max_week)
                 for _, row in wbs_edited.iterrows():
                     w_start = int(row["Mulai (minggu)"])
@@ -939,7 +1015,6 @@ with tab4:
                         plan_weekly[w_start - 1:w_end] += bobot / span
                 plan_cum = np.cumsum(plan_weekly)
 
-                # Realisasi
                 actual_weekly = np.zeros(max_week)
                 for _, row in wbs_edited.iterrows():
                     w_start = int(row["Mulai (minggu)"])
@@ -956,13 +1031,10 @@ with tab4:
                     actual_weekly[w_start - 1:w_actual_end] += target / span_actual
                 actual_cum = np.cumsum(actual_weekly)
 
-                # Plot
                 fig, ax = plt.subplots(figsize=(12, 5))
-                ax.fill_between(weeks, plan_cum, actual_cum,
-                                where=(actual_cum < plan_cum),
+                ax.fill_between(weeks, plan_cum, actual_cum, where=(actual_cum < plan_cum),
                                 color="#dc2626", alpha=0.12, label="Di bawah rencana")
-                ax.fill_between(weeks, plan_cum, actual_cum,
-                                where=(actual_cum >= plan_cum),
+                ax.fill_between(weeks, plan_cum, actual_cum, where=(actual_cum >= plan_cum),
                                 color="#047857", alpha=0.12, label="Di atas rencana")
                 ax.plot(weeks, plan_cum, color="#1e40af", linewidth=2.5,
                         marker="o", markersize=5, label="Rencana")
@@ -1008,7 +1080,6 @@ with tab4:
                 else:
                     st.success(f"Progress sesuai atau lebih cepat {deviasi:+.1f}%.")
 
-                # Tabel S-Curve
                 with st.expander("Lihat tabel S-Curve"):
                     df_scurve = pd.DataFrame({
                         "Minggu": weeks,
@@ -1017,9 +1088,8 @@ with tab4:
                         "Deviasi (%)": np.round(actual_cum - plan_cum, 2),
                     })
                     st.dataframe(df_scurve, use_container_width=True, hide_index=True)
-
                     st.download_button(
-                        "Unduh data S-Curve (CSV)",
+                        "Unduh S-Curve (CSV)",
                         data=df_scurve.to_csv(index=False).encode("utf-8-sig"),
                         file_name=f"s_curve_{meta['name'].replace(' ', '_')}.csv",
                         mime="text/csv",
@@ -1027,7 +1097,6 @@ with tab4:
 
                 st.markdown("---")
 
-                # Form Site Execution
                 with st.form("form_se"):
                     col1, col2 = st.columns(2)
                     with col1:
@@ -1106,6 +1175,7 @@ with tab4:
                                 "total_bobot": float(total_bobot),
                             }
                             live_data["site_execution"] = payload
+                            persist()
                             st.success("Data Site Execution tersimpan.")
                             st.rerun()
 
@@ -1152,9 +1222,8 @@ with tab5:
                 with c3:
                     approved_by = st.text_input("Disetujui oleh", placeholder="Nama lengkap")
 
-                bast_notes = st.text_area(
-                    "Catatan BAST", placeholder="Catatan minimal 10 karakter...", height=80
-                )
+                bast_notes = st.text_area("Catatan BAST",
+                                          placeholder="Catatan minimal 10 karakter...", height=80)
             else:
                 bast_date = bast_number = approved_by = bast_notes = None
 
@@ -1201,6 +1270,7 @@ with tab5:
                         "bast_notes": bast_notes,
                     }
                     live_data["quality_control"] = payload
+                    persist()
                     st.success("Data Quality Control tersimpan.")
                     st.rerun()
 
@@ -1210,7 +1280,7 @@ with tab5:
 with tab6:
     st.markdown("## Laporan Project")
 
-    st.markdown("#### Status Tahapan Project Ini")
+    st.markdown("#### Status Tahapan")
     rows = []
     for t in ["tender", "project_mgmt", "vendor_selection", "site_execution", "quality_control"]:
         d = live_data.get(t, {})
@@ -1239,7 +1309,7 @@ with tab6:
         c1, c2, c3 = st.columns(3)
         c1.metric("Vendor", vs.get("selected_vendor", "-"))
         c2.metric("Nilai Kontrak", format_rupiah(vs.get("selected_cost", 0)))
-        c3.metric("Durasi Kontrak", f"{vs.get('selected_duration', 0)} hari")
+        c3.metric("Durasi", f"{vs.get('selected_duration', 0)} hari")
 
     if se:
         st.markdown("##### Progress Site Execution")
@@ -1248,10 +1318,6 @@ with tab6:
         c2.metric("Realisasi", f"{se.get('actual_pct', 0):.1f}%")
         c3.metric("Deviasi", f"{se.get('deviation_pct', 0):+.1f}%")
         c4.metric("SPI", f"{se.get('spi', 0):.3f}")
-        st.caption(
-            f"Kendala: {se.get('kendala', '-')} · Aksi: {se.get('aksi', '-')} · "
-            f"KPI: {se.get('kpi', 0)}%"
-        )
 
     if qc:
         st.markdown("##### Quality Control")
@@ -1260,46 +1326,47 @@ with tab6:
         c2.metric("BAST", qc.get("bast_number", "-"))
 
     st.markdown("---")
-    st.markdown("#### Unduh Data Project (CSV)")
+    st.markdown("#### Unduh Data")
 
-    if tender or vs or se or qc:
-        all_data = {
-            "tender": tender,
-            "project_mgmt": live_data.get("project_mgmt", {}),
-            "vendor_selection": vs,
-            "site_execution": se,
-            "quality_control": qc,
-        }
-        rows = []
-        for tahap, d in all_data.items():
-            if d:
-                row = {"Tahap": label(tahap)}
-                row.update({k: str(v) for k, v in d.items()})
-                rows.append(row)
-        if rows:
-            st.download_button(
-                "Unduh data project (CSV)",
-                data=pd.DataFrame(rows).to_csv(index=False).encode("utf-8-sig"),
-                file_name=f"project_{meta['name'].replace(' ', '_')}.csv",
-                mime="text/csv",
-            )
-
-    # Unduh WBS + S-Curve
-    if active["wbs_data"] is not None and not active["wbs_data"].empty:
-        st.markdown("---")
-        st.markdown("#### Unduh Template WBS / S-Curve")
-        st.download_button(
-            "Unduh WBS (CSV)",
-            data=active["wbs_data"].to_csv(index=False).encode("utf-8-sig"),
-            file_name=f"wbs_{meta['name'].replace(' ', '_')}.csv",
-            mime="text/csv",
-        )
+    c1, c2 = st.columns(2)
+    with c1:
+        if tender or vs or se or qc:
+            all_data = {
+                "tender": tender,
+                "project_mgmt": live_data.get("project_mgmt", {}),
+                "vendor_selection": vs,
+                "site_execution": se,
+                "quality_control": qc,
+            }
+            rows = []
+            for tahap, d in all_data.items():
+                if d:
+                    row = {"Tahap": label(tahap)}
+                    row.update({k: str(v) for k, v in d.items()})
+                    rows.append(row)
+            if rows:
+                st.download_button(
+                    "Unduh data project (CSV)",
+                    data=pd.DataFrame(rows).to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"project_{meta['name'].replace(' ', '_')}.csv",
+                    mime="text/csv",
+                )
+    with c2:
+        if active.get("wbs_data"):
+            wbs_df = pd.DataFrame(active["wbs_data"])
+            if not wbs_df.empty:
+                st.download_button(
+                    "Unduh WBS (CSV)",
+                    data=wbs_df.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"wbs_{meta['name'].replace(' ', '_')}.csv",
+                    mime="text/csv",
+                )
 
 # =========================================================
 # TAB 7 — PORTFOLIO
 # =========================================================
 with tab7:
-    st.markdown("## Portfolio — Rekapitulasi Semua Project")
+    st.markdown("## Portfolio — Semua Project Anda")
 
     projects = st.session_state.projects
     if not projects:
@@ -1331,7 +1398,7 @@ with tab7:
                 "Lokasi": m["location"],
                 "Budget": format_rupiah(m["budget"]),
                 "Deadline (hari)": m["deadline"],
-                "Tahapan Selesai": f"{done}/{total}",
+                "Tahapan": f"{done}/{total}",
                 "Vendor Terpilih": vs.get("selected_vendor", "-"),
                 "Nilai Kontrak": format_rupiah(vs.get("selected_cost", 0)) if vs.get("selected_cost") else "-",
                 "Progress (%)": se.get("actual_pct", 0),
@@ -1349,7 +1416,6 @@ with tab7:
         c4.metric("Project selesai", df_summary[df_summary["Status"] == "Selesai"].shape[0])
 
         st.markdown("---")
-        st.markdown("#### Tabel Rekapitulasi")
         st.dataframe(df_summary, use_container_width=True, hide_index=True)
 
         st.markdown("---")
@@ -1389,10 +1455,8 @@ with tab7:
             for tahap, d in p["live_data"].items():
                 if d:
                     row = {
-                        "Project ID": pid_,
-                        "Project": m["name"],
-                        "Klien": m["client"],
-                        "Lokasi": m["location"],
+                        "Project ID": pid_, "Project": m["name"],
+                        "Klien": m["client"], "Lokasi": m["location"],
                         "Tahap": label(tahap),
                     }
                     row.update({k: str(v) for k, v in d.items()})
@@ -1407,4 +1471,4 @@ with tab7:
             )
 
 st.markdown("---")
-st.caption("Vendor Selection & Project Control · Multi-project workspace · Data simulasi.")
+st.caption(f"Login sebagai {user_email} · Data tersimpan di akun Anda.")
