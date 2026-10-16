@@ -106,13 +106,6 @@ st.markdown("""
         font-size: 0.82rem; color: #4b5563;
         margin-bottom: 12px;
     }
-    .vendor-card {
-        background: #ffffff;
-        border: 1px solid #e5e7eb;
-        border-radius: 8px;
-        padding: 16px 20px;
-        margin-bottom: 12px;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -127,6 +120,19 @@ def format_rupiah(juta):
     if abs(juta) >= 1000:
         return f"Rp {juta/1000:,.2f} miliar"
     return f"Rp {juta:,.0f} juta"
+
+
+def sigmoid_kernel(t, k=4.0):
+    """
+    Kernel S untuk distribusi progress dalam satu item.
+    t = 0..1 (progress waktu dari start ke end item)
+    Return: 0..1, dengan bentuk S (landai → curam → landai)
+    """
+    if t <= 0:
+        return 0.0
+    if t >= 1:
+        return 1.0
+    return 0.5 * (1 + np.tanh(k * (t - 0.5)))
 
 
 def _create_binary_vars(prob, var_name, index_list):
@@ -148,12 +154,8 @@ def _create_binary_vars(prob, var_name, index_list):
     return x
 
 
-def solve_vendor_lp(vendor_names, costs, budget, scores=None, weight_price=0.6, weight_perf=0.4):
-    """
-    Optimasi pemilihan vendor dengan mempertimbangkan harga & performa.
-    score = weight_price * (min_cost / cost) + weight_perf * (perf / 100)
-    → maximize total score
-    """
+def solve_vendor_lp(vendor_names, costs, budget, scores=None,
+                    weight_price=0.5, weight_perf=0.5):
     try:
         prob = pulp.LpProblem("Vendor_Selection", pulp.LpMaximize)
         x = _create_binary_vars(prob, "select", vendor_names)
@@ -161,15 +163,21 @@ def solve_vendor_lp(vendor_names, costs, budget, scores=None, weight_price=0.6, 
         if scores is None:
             scores = {n: 100 for n in vendor_names}
 
-        min_cost = min(costs.values()) if costs else 1
+        min_cost = min(costs.values())
+        max_cost = max(costs.values())
+        cost_range = max_cost - min_cost if max_cost > min_cost else 1
 
-        # Objective: maximize weighted score
+        # Normalisasi min-max: harga termurah = 100, termahal = 0
+        cost_scores = {
+            n: 100 * (max_cost - costs[n]) / cost_range
+            for n in vendor_names
+        }
+
         prob += pulp.lpSum(
-            (weight_price * (min_cost / costs[n])
-             + weight_perf * (scores[n] / 100)) * x[n]
+            (weight_price * cost_scores[n] / 100
+             + weight_perf * scores[n] / 100) * x[n]
             for n in vendor_names
         )
-
         prob += pulp.lpSum(x[n] for n in vendor_names) == 1
         prob += pulp.lpSum(costs[n] * x[n] for n in vendor_names) <= budget
 
@@ -233,8 +241,8 @@ def create_project(name, client, location, budget, deadline):
             "site_execution": {}, "quality_control": {},
         },
         "wbs_data": None,
-        "items_data": None,        # BOQ item pekerjaan dari kita
-        "vendor_data": {},         # {vendor_name: {harga, kemampuan, performa}}
+        "items_data": None,
+        "vendor_data": {},
         "appointments": [],
     }
     return pid
@@ -265,24 +273,41 @@ def project_progress(project):
 
 
 def default_items():
-    """BOQ item pekerjaan dari kita (klien)."""
     return pd.DataFrame([
-        {"No": 1, "Item Pekerjaan": "Fabrikasi Pipa Carbon Steel", "Volume": "500 m",
-         "Satuan": "m", "Spesifikasi": "ASTM A106 Gr.B", "Kompleksitas": "Sedang"},
-        {"No": 2, "Item Pekerjaan": "Welding SMAW + GTAW", "Volume": "300",
-         "Satuan": "joint", "Spesifikasi": "WPS sesuai ASME IX", "Kompleksitas": "Tinggi"},
-        {"No": 3, "Item Pekerjaan": "NDT Radiografi", "Volume": "150",
-         "Satuan": "titik", "Spesifikasi": "ASME V Article 2", "Kompleksitas": "Tinggi"},
-        {"No": 4, "Item Pekerjaan": "Hydrotest", "Volume": "3",
-         "Satuan": "line", "Spesifikasi": "ASME B31.3", "Kompleksitas": "Sedang"},
-        {"No": 5, "Item Pekerjaan": "Support & Hanger Installation", "Volume": "80",
-         "Satuan": "unit", "Spesifikasi": "MSS SP-58", "Kompleksitas": "Rendah"},
-        {"No": 6, "Item Pekerjaan": "Painting & Coating", "Volume": "800",
-         "Satuan": "m²", "Spesifikasi": "SSPC-SP10", "Kompleksitas": "Rendah"},
+        {"No": 1, "Item Pekerjaan": "Fabrikasi Pipa Carbon Steel", "Volume": "500", "Satuan": "m",
+         "Spesifikasi": "ASTM A106 Gr.B", "Kompleksitas": "Sedang"},
+        {"No": 2, "Item Pekerjaan": "Welding SMAW + GTAW", "Volume": "300", "Satuan": "joint",
+         "Spesifikasi": "WPS sesuai ASME IX", "Kompleksitas": "Tinggi"},
+        {"No": 3, "Item Pekerjaan": "NDT Radiografi", "Volume": "150", "Satuan": "titik",
+         "Spesifikasi": "ASME V Article 2", "Kompleksitas": "Tinggi"},
+        {"No": 4, "Item Pekerjaan": "Hydrotest", "Volume": "3", "Satuan": "line",
+         "Spesifikasi": "ASME B31.3", "Kompleksitas": "Sedang"},
+        {"No": 5, "Item Pekerjaan": "Support & Hanger Installation", "Volume": "80", "Satuan": "unit",
+         "Spesifikasi": "MSS SP-58", "Kompleksitas": "Rendah"},
+        {"No": 6, "Item Pekerjaan": "Painting & Coating", "Volume": "800", "Satuan": "m²",
+         "Spesifikasi": "SSPC-SP10", "Kompleksitas": "Rendah"},
     ])
 
 
-# Vendor yang diundang (default)
+def default_wbs():
+    return pd.DataFrame([
+        {"No": 1, "Item Pekerjaan": "Persiapan & Mobilisasi", "Bobot (%)": 5.0,
+         "Mulai (minggu)": 1, "Selesai (minggu)": 3, "Realisasi (%)": 100.0},
+        {"No": 2, "Item Pekerjaan": "Pekerjaan Tanah & Pondasi", "Bobot (%)": 15.0,
+         "Mulai (minggu)": 2, "Selesai (minggu)": 6, "Realisasi (%)": 100.0},
+        {"No": 3, "Item Pekerjaan": "Fabrikasi Pipa", "Bobot (%)": 25.0,
+         "Mulai (minggu)": 4, "Selesai (minggu)": 10, "Realisasi (%)": 80.0},
+        {"No": 4, "Item Pekerjaan": "Instalasi Pipa & Support", "Bobot (%)": 30.0,
+         "Mulai (minggu)": 6, "Selesai (minggu)": 12, "Realisasi (%)": 45.0},
+        {"No": 5, "Item Pekerjaan": "Welding & NDT", "Bobot (%)": 10.0,
+         "Mulai (minggu)": 8, "Selesai (minggu)": 13, "Realisasi (%)": 20.0},
+        {"No": 6, "Item Pekerjaan": "Painting & Insulation", "Bobot (%)": 8.0,
+         "Mulai (minggu)": 10, "Selesai (minggu)": 14, "Realisasi (%)": 0.0},
+        {"No": 7, "Item Pekerjaan": "Testing, Commissioning & Handover", "Bobot (%)": 7.0,
+         "Mulai (minggu)": 12, "Selesai (minggu)": 15, "Realisasi (%)": 0.0},
+    ])
+
+
 INVITED_VENDORS = [
     "PT Baja Nusantara Konstruksi",
     "CV Prima Pipa Sejahtera",
@@ -292,7 +317,6 @@ INVITED_VENDORS = [
 ]
 
 
-# ASPEK PERFORM A (untuk diisi vendor sendiri)
 PERFORMANCE_ASPECTS = [
     "Kualitas Pekerjaan",
     "Ketepatan Waktu",
@@ -379,8 +403,8 @@ with st.sidebar:
         min_performance = st.slider("Skor performa minimum", 0, 100, 70, key="min_perf")
         budget_weight = st.slider(
             "Bobot harga vs performa (%)",
-            0, 100, 60, key="weight_price",
-            help="60% = harga lebih dominan, 40% = performa lebih dominan"
+            0, 100, 50, key="weight_price",
+            help="50% = harga & performa seimbang."
         )
         weight_price = budget_weight / 100
         weight_perf = 1 - weight_price
@@ -418,7 +442,7 @@ with st.sidebar:
             st.rerun()
     else:
         min_quality, min_hse, min_performance = 82, 85, 70
-        weight_price, weight_perf = 0.6, 0.4
+        weight_price, weight_perf = 0.5, 0.5
 
 # =========================================================
 # HEADER
@@ -576,13 +600,11 @@ if step == 1:
     st.markdown(
         "<div class='flow-hint'>"
         "Alur: Klien membuka tender → kita siapkan BOQ (Bill of Quantities) → "
-        "vendor diundang untuk mengisi RAB & performa di tahap berikutnya. "
-        "Setelah BOQ & timeline siap, lanjut ke <b>Vendor Qualification</b>."
+        "vendor diundang untuk mengisi RAB & performa di tahap berikutnya."
         "</div>",
         unsafe_allow_html=True,
     )
 
-    # Sub-tab internal
     sub1, sub2 = st.tabs(["1. Dokumen & Timeline Tender", "2. BOQ — Bill of Quantities"])
 
     with sub1:
@@ -591,7 +613,7 @@ if step == 1:
             st.markdown("#### Dokumen Tender")
             doc_drawing = st.checkbox("Gambar kerja", value=True, key="td_drawing")
             doc_rks = st.checkbox("RKS — Rencana Kerja & Syarat", value=True, key="td_rks")
-            doc_spek = st.checkbox("Spesifikasi teknis", value=True, key="td_boq_doc")
+            doc_spek = st.checkbox("Spesifikasi teknis", value=True, key="td_spek")
             doc_boq = st.checkbox("Bill of Quantities", value=True, key="td_boq_check")
             doc_k3 = st.checkbox("Dokumen K3 / HSE Plan", value=True, key="td_k3")
 
@@ -607,8 +629,7 @@ if step == 1:
             st.markdown("#### RAB Awal (Estimasi Kita)")
             st.markdown(
                 f"<div class='hint-box'>"
-                f"Budget project: <b>{format_rupiah(meta['budget'])}</b>. "
-                f"RAB ini estimasi kita — nanti vendor akan mengisi RAB versi mereka."
+                f"Budget project: <b>{format_rupiah(meta['budget'])}</b>."
                 f"</div>",
                 unsafe_allow_html=True,
             )
@@ -635,10 +656,7 @@ if step == 1:
 
     with sub2:
         st.markdown("### BOQ — Bill of Quantities")
-        st.caption(
-            "Daftar item pekerjaan yang akan dilelang. Vendor akan mengisi RAB mereka "
-            "untuk setiap item ini di tahap Vendor Qualification."
-        )
+        st.caption("Daftar item pekerjaan yang akan dilelang ke vendor.")
 
         if active.get("items_data") is None:
             active["items_data"] = default_items().to_dict("records")
@@ -649,9 +667,7 @@ if step == 1:
             num_rows="dynamic", key=f"items_editor_{pid}",
             column_config={
                 "No": st.column_config.NumberColumn("No", min_value=1, step=1, width="small"),
-                "Item Pekerjaan": st.column_config.TextColumn(
-                    "Item Pekerjaan", required=True, width="large"
-                ),
+                "Item Pekerjaan": st.column_config.TextColumn("Item Pekerjaan", required=True, width="large"),
                 "Volume": st.column_config.TextColumn("Volume", width="small"),
                 "Satuan": st.column_config.TextColumn("Satuan", width="small"),
                 "Spesifikasi": st.column_config.TextColumn("Spesifikasi"),
@@ -662,7 +678,6 @@ if step == 1:
         )
         active["items_data"] = items_edited.to_dict("records")
 
-    # Validasi form
     dokumen_lengkap = all([doc_drawing, doc_rks, doc_spek, doc_boq, doc_k3])
     catatan_lengkap = len(catatan.strip()) >= 10
     timeline_valid = tgl_aanwijzing < tgl_penawaran < tgl_kontrak
@@ -678,12 +693,12 @@ if step == 1:
         if not timeline_valid:
             missing.append("urutan tanggal tidak valid")
         if not items_ok:
-            missing.append("BOQ harus diisi minimal 1 item")
+            missing.append("BOQ minimal 1 item")
         st.warning("Belum lengkap — " + "; ".join(missing))
 
     if st.button("Simpan Data Tender & BOQ", type="primary", key="btn_save_tender"):
         if not form_valid:
-            st.error("Data belum lengkap. Perbaiki dulu.")
+            st.error("Data belum lengkap.")
         else:
             meta["budget"] = float(budget_input)
             meta["rab_awal"] = float(rab_awal_input)
@@ -705,7 +720,7 @@ if step == 1:
                 "boq_count": len(active["items_data"]),
             }
             live_data["tender"] = payload
-            st.success("Tender & BOQ tersimpan. Melanjutkan ke Vendor Qualification...")
+            st.success("Tersimpan. Lanjut ke Vendor Qualification...")
             next_step()
             st.rerun()
 
@@ -721,9 +736,8 @@ elif step == 2:
 
     st.markdown(
         "<div class='flow-hint'>"
-        "Alur: Vendor diundang → mereka isi RAB + kemampuan teknis + performa mereka → "
-        "kita jadwalkan appointment klarifikasi teknis → hasil klarifikasi dicatat → "
-        "<b>baru</b> dioptimasi untuk pilih vendor terbaik → deal harga & SPK."
+        "Alur: Vendor diundang → mereka isi RAB + kemampuan + performa → "
+        "klarifikasi teknis → optimasi → deal harga & SPK."
         "</div>",
         unsafe_allow_html=True,
     )
@@ -736,24 +750,17 @@ elif step == 2:
         "5. Deal Harga & SPK",
     ])
 
-    # ---------------------------------------------------------
-    # SUB-TAB 1: BOQ & VENDOR DIUNDANG
-    # ---------------------------------------------------------
+    # SUB 1
     with sub1:
-        st.markdown("### Item Pekerjaan (BOQ dari Kita)")
-        st.caption("Ini adalah daftar item yang akan diisi vendor di sub-tab berikutnya.")
-
+        st.markdown("### Item Pekerjaan (BOQ)")
         items_data = active.get("items_data", [])
         if not items_data:
-            st.warning("BOQ belum diisi. Kembali ke Tahap 1 untuk mengisi BOQ.")
+            st.warning("BOQ belum diisi. Kembali ke Tahap 1.")
         else:
             st.dataframe(pd.DataFrame(items_data), use_container_width=True, hide_index=True)
 
         st.markdown("---")
         st.markdown("### Vendor yang Diundang")
-        st.caption("Daftar vendor yang diundang untuk mengikuti proses seleksi ini.")
-
-        # Input vendor diundang — bisa di-edit
         if "invited_vendors" not in active or not active["invited_vendors"]:
             active["invited_vendors"] = INVITED_VENDORS.copy()
 
@@ -761,327 +768,217 @@ elif step == 2:
         invited_edited = st.data_editor(
             invited_df, use_container_width=True, hide_index=True,
             num_rows="dynamic", key=f"invited_{pid}",
-            column_config={
-                "Vendor": st.column_config.TextColumn("Vendor", required=True),
-            },
+            column_config={"Vendor": st.column_config.TextColumn("Vendor", required=True)},
         )
         active["invited_vendors"] = invited_edited["Vendor"].dropna().tolist()
 
-    # ---------------------------------------------------------
-    # SUB-TAB 2: INPUT RAB + KEMAMPUAN + PERFORMA
-    # ---------------------------------------------------------
+    # SUB 2
     with sub2:
-        st.markdown("### Input Data dari Vendor")
-        st.caption(
-            "Untuk setiap vendor, masukkan: (a) RAB mereka (harga jual), "
-            "(b) kemampuan teknis mereka untuk setiap item, "
-            "(c) penilaian performa mereka sendiri."
-        )
-
+        st.markdown("### Input Data Vendor")
         invited = active.get("invited_vendors", [])
         if not invited:
-            st.warning("Belum ada vendor diundang. Isi di sub-tab 1.")
+            st.warning("Belum ada vendor diundang.")
         else:
-            # Inisialisasi data vendor
             if "vendor_data" not in active or not active["vendor_data"]:
                 active["vendor_data"] = {}
 
             for v in invited:
                 if v not in active["vendor_data"]:
                     active["vendor_data"][v] = {
-                        "harga_rab": 0.0,
-                        "durasi": 0,
-                        "kemampuan": {},   # {item_no: {status, catatan}}
+                        "harga_rab": 0.0, "durasi": 0,
+                        "kemampuan": {},
                         "performa": {aspek: 75 for aspek in PERFORMANCE_ASPECTS},
                         "catatan_vendor": "",
                     }
 
-            vendor_pick = st.selectbox(
-                "Pilih vendor untuk diinput",
-                options=invited,
-                key=f"vendor_input_{pid}",
-            )
-
+            vendor_pick = st.selectbox("Pilih vendor", options=invited, key=f"vp_{pid}")
             v_data = active["vendor_data"][vendor_pick]
 
-            # Bagian A: RAB & durasi
             st.markdown(f"#### A. RAB & Durasi — {vendor_pick}")
             c1, c2 = st.columns(2)
             with c1:
                 v_data["harga_rab"] = st.number_input(
-                    "Harga RAB vendor (juta Rp)",
-                    min_value=0.0,
-                    value=float(v_data["harga_rab"]),
-                    step=5.0,
-                    key=f"rab_v_{vendor_pick}",
-                    help="Harga jual total dari vendor untuk seluruh BOQ."
+                    "Harga RAB (juta Rp)", min_value=0.0,
+                    value=float(v_data["harga_rab"]), step=5.0,
+                    key=f"rab_{vendor_pick}",
                 )
             with c2:
                 v_data["durasi"] = st.number_input(
-                    "Durasi penawaran (hari)",
-                    min_value=1,
+                    "Durasi (hari)", min_value=1,
                     value=int(v_data["durasi"]) if v_data["durasi"] > 0 else 60,
-                    step=1,
-                    key=f"dur_v_{vendor_pick}",
+                    step=1, key=f"dur_{vendor_pick}",
                 )
 
-            # Bagian B: Kemampuan teknis per item
             st.markdown(f"#### B. Kemampuan Teknis per Item — {vendor_pick}")
             items_data = active.get("items_data", [])
-            if not items_data:
-                st.warning("BOQ belum diisi.")
-            else:
-                for item in items_data:
-                    item_no = str(item["No"])
-                    if item_no not in v_data["kemampuan"]:
-                        v_data["kemampuan"][item_no] = {"status": "Sanggup", "catatan": ""}
+            for item in items_data:
+                item_no = str(item["No"])
+                if item_no not in v_data["kemampuan"]:
+                    v_data["kemampuan"][item_no] = {"status": "Sanggup", "catatan": ""}
 
-                    c1, c2, c3 = st.columns([2, 1, 2])
-                    with c1:
-                        st.markdown(f"**{item['No']}. {item['Item Pekerjaan']}**")
-                        st.caption(
-                            f"{item['Spesifikasi']} · Volume: {item['Volume']} {item['Satuan']} · "
-                            f"Kompleksitas: {item['Kompleksitas']}"
-                        )
-                    with c2:
-                        status_val = st.selectbox(
-                            f"Status item {item_no}",
-                            ["Sanggup", "Sanggup dengan Catatan", "Tidak Sanggup"],
-                            index=["Sanggup", "Sanggup dengan Catatan", "Tidak Sanggup"].index(
-                                v_data["kemampuan"][item_no]["status"]
-                            ),
-                            key=f"stat_{vendor_pick}_{item_no}",
-                            label_visibility="collapsed",
-                        )
-                    with c3:
-                        catatan_val = st.text_input(
-                            f"Catatan item {item_no}",
-                            value=v_data["kemampuan"][item_no]["catatan"],
-                            key=f"cat_{vendor_pick}_{item_no}",
-                            placeholder="Catatan (opsional)",
-                            label_visibility="collapsed",
-                        )
-                    v_data["kemampuan"][item_no] = {
-                        "status": status_val,
-                        "catatan": catatan_val,
-                    }
+                c1, c2, c3 = st.columns([2, 1, 2])
+                with c1:
+                    st.markdown(f"**{item['No']}. {item['Item Pekerjaan']}**")
+                    st.caption(f"{item['Spesifikasi']} · {item['Volume']} {item['Satuan']}")
+                with c2:
+                    status_val = st.selectbox(
+                        f"Status {item_no}",
+                        ["Sanggup", "Sanggup dengan Catatan", "Tidak Sanggup"],
+                        index=["Sanggup", "Sanggup dengan Catatan", "Tidak Sanggup"].index(
+                            v_data["kemampuan"][item_no]["status"]
+                        ),
+                        key=f"st_{vendor_pick}_{item_no}",
+                        label_visibility="collapsed",
+                    )
+                with c3:
+                    catatan_val = st.text_input(
+                        f"Catatan {item_no}",
+                        value=v_data["kemampuan"][item_no]["catatan"],
+                        key=f"ct_{vendor_pick}_{item_no}",
+                        placeholder="Catatan",
+                        label_visibility="collapsed",
+                    )
+                v_data["kemampuan"][item_no] = {"status": status_val, "catatan": catatan_val}
 
-            # Bagian C: Performa (diisi vendor sendiri)
             st.markdown(f"#### C. Penilaian Performa — {vendor_pick}")
-            st.caption(
-                "Vendor menilai dirinya sendiri berdasarkan pengalaman proyek sebelumnya. "
-                "Kita akan verifikasi di appointment klarifikasi teknis."
-            )
             c1, c2 = st.columns(2)
             for i, aspek in enumerate(PERFORMANCE_ASPECTS):
                 target = c1 if i % 2 == 0 else c2
                 with target:
                     v_data["performa"][aspek] = st.slider(
-                        aspek,
-                        0, 100,
-                        v_data["performa"][aspek],
-                        key=f"perf_{vendor_pick}_{aspek}"
+                        aspek, 0, 100, v_data["performa"][aspek],
+                        key=f"pf_{vendor_pick}_{aspek}"
                     )
 
-            # Bagian D: Catatan
-            st.markdown(f"#### D. Catatan Vendor — {vendor_pick}")
+            st.markdown(f"#### D. Catatan — {vendor_pick}")
             v_data["catatan_vendor"] = st.text_area(
-                "Catatan dari vendor",
-                value=v_data["catatan_vendor"],
-                placeholder="Contoh: Kami butuh tambahan manlift untuk area terbatas.",
-                height=100,
-                key=f"note_{vendor_pick}",
+                "Catatan", value=v_data["catatan_vendor"], height=100,
+                key=f"nt_{vendor_pick}",
             )
 
-            # Simpan ke session state
             active["vendor_data"][vendor_pick] = v_data
 
-            # Tampilkan ringkasan
             st.markdown("---")
-            st.markdown("#### Ringkasan Data Semua Vendor")
-            summary_rows = []
+            st.markdown("#### Ringkasan")
+            rows = []
             for v in invited:
                 vd = active["vendor_data"][v]
-                avg_perf = (
-                    sum(vd["performa"].values()) / len(vd["performa"])
-                    if vd["performa"] else 0
-                )
-                sanggup_count = sum(
-                    1 for k, val in vd["kemampuan"].items()
-                    if val["status"] == "Sanggup"
-                )
-                total_items = len(vd["kemampuan"]) if vd["kemampuan"] else 1
-                summary_rows.append({
+                avg_perf = sum(vd["performa"].values()) / len(vd["performa"]) if vd["performa"] else 0
+                sanggup = sum(1 for k, val in vd["kemampuan"].items() if val["status"] == "Sanggup")
+                total = len(vd["kemampuan"]) if vd["kemampuan"] else 1
+                rows.append({
                     "Vendor": v,
                     "RAB (jt)": vd["harga_rab"],
-                    "Durasi (hari)": vd["durasi"],
-                    "Kemampuan (%)": f"{sanggup_count}/{total_items}",
+                    "Durasi": vd["durasi"],
+                    "Kemampuan": f"{sanggup}/{total}",
                     "Skor Performa": round(avg_perf, 1),
                 })
-            st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-    # ---------------------------------------------------------
-    # SUB-TAB 3: APPOINTMENT KLARIFIKASI TEKNIS
-    # ---------------------------------------------------------
+    # SUB 3
     with sub3:
         st.markdown("### Appointment Klarifikasi Teknis")
-        st.caption(
-            "Jadwalkan pertemuan dengan setiap vendor untuk klarifikasi kemampuan teknis, "
-            "validasi RAB, dan verifikasi performa. Hasil klarifikasi akan dicatat di sini."
-        )
-
         invited = active.get("invited_vendors", [])
         if not invited:
-            st.warning("Belum ada vendor diundang.")
+            st.warning("Belum ada vendor.")
         else:
-            with st.expander("➕ Buat Appointment Baru", expanded=True):
+            with st.expander("➕ Buat Appointment", expanded=True):
                 c1, c2 = st.columns(2)
                 with c1:
-                    appt_vendor = st.selectbox(
-                        "Vendor", options=invited, key=f"appt_vendor_{pid}"
-                    )
-                    appt_mode = st.radio(
-                        "Mode pertemuan",
-                        ["Tatap muka (Kantor)", "Tatap muka (On-site)", "Zoom Meeting"],
-                        key=f"appt_mode_{pid}"
-                    )
-                    appt_date = st.date_input("Tanggal", date.today(), key=f"appt_date_{pid}")
-                    appt_time = st.time_input("Jam mulai", time(9, 0), key=f"appt_time_{pid}")
-                    appt_duration = st.number_input(
-                        "Durasi (menit)", min_value=30, max_value=480, value=90, step=15,
-                        key=f"appt_dur_{pid}"
-                    )
+                    appt_vendor = st.selectbox("Vendor", options=invited, key=f"apv_{pid}")
+                    appt_mode = st.radio("Mode", ["Tatap muka (Kantor)", "Tatap muka (On-site)", "Zoom Meeting"], key=f"apm_{pid}")
+                    appt_date = st.date_input("Tanggal", date.today(), key=f"apd_{pid}")
+                    appt_time = st.time_input("Jam", time(9, 0), key=f"apt_{pid}")
+                    appt_duration = st.number_input("Durasi (menit)", 30, 480, 90, 15, key=f"apdur_{pid}")
                 with c2:
-                    appt_location = st.text_input(
-                        "Lokasi / Link Zoom",
-                        placeholder="Meeting Room A / https://zoom.us/j/...",
-                        key=f"appt_loc_{pid}"
-                    )
-                    appt_participants = st.text_area(
-                        "Peserta dari kami",
-                        placeholder="PM, Engineering, HSE, QC",
-                        height=80,
-                        key=f"appt_part_{pid}"
-                    )
-                    appt_vendor_participants = st.text_area(
-                        "Peserta dari vendor",
-                        placeholder="Site Manager, Welding Engineer, QC",
-                        height=80,
-                        key=f"appt_vpart_{pid}"
-                    )
-                    appt_agenda = st.text_area(
-                        "Agenda",
-                        placeholder="Contoh: Klarifikasi WPS, jadwal NDT, metode hydrotest",
-                        height=100,
-                        key=f"appt_agenda_{pid}"
-                    )
+                    appt_location = st.text_input("Lokasi / Link Zoom", placeholder="Meeting Room A", key=f"apl_{pid}")
+                    appt_participants = st.text_area("Peserta kami", height=80, key=f"app_{pid}")
+                    appt_vendor_participants = st.text_area("Peserta vendor", height=80, key=f"apvp_{pid}")
+                    appt_agenda = st.text_area("Agenda", placeholder="Klarifikasi WPS, NDT, hydrotest...", height=100, key=f"apa_{pid}")
 
-                if st.button("Simpan Appointment", type="primary", key=f"btn_appt_{pid}"):
+                if st.button("Simpan Appointment", type="primary", key=f"btna_{pid}"):
                     if not appt_location.strip():
-                        st.error("Lokasi / Link Zoom wajib diisi.")
+                        st.error("Lokasi wajib diisi.")
                     elif len(appt_agenda.strip()) < 10:
                         st.error("Agenda minimal 10 karakter.")
                     else:
-                        appointment = {
+                        active["appointments"].append({
                             "id": str(uuid.uuid4())[:6],
-                            "vendor": appt_vendor,
-                            "mode": appt_mode,
-                            "date": str(appt_date),
-                            "time": str(appt_time),
+                            "vendor": appt_vendor, "mode": appt_mode,
+                            "date": str(appt_date), "time": str(appt_time),
                             "duration": int(appt_duration),
                             "location": appt_location,
                             "participants": appt_participants,
                             "vendor_participants": appt_vendor_participants,
-                            "agenda": appt_agenda,
-                            "status": "Terjadwal",
+                            "agenda": appt_agenda, "status": "Terjadwal",
                             "hasil": "",
                             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        }
-                        active["appointments"].append(appointment)
+                        })
                         st.success("Appointment dibuat.")
                         st.rerun()
 
             st.markdown("---")
-            st.markdown("#### Daftar Appointment & Hasil Klarifikasi")
-
             if not active["appointments"]:
                 st.info("Belum ada appointment.")
             else:
                 for i, appt in enumerate(active["appointments"]):
                     with st.expander(
-                        f"[{appt['status']}] {appt['vendor']} · {appt['mode']} · "
-                        f"{appt['date']} {appt['time']}",
+                        f"[{appt['status']}] {appt['vendor']} · {appt['mode']} · {appt['date']} {appt['time']}",
                         expanded=(i == 0),
                     ):
                         c1, c2 = st.columns(2)
                         with c1:
                             st.markdown(f"**Vendor:** {appt['vendor']}")
                             st.markdown(f"**Mode:** {appt['mode']}")
-                            st.markdown(f"**Tanggal:** {appt['date']} · {appt['time']} ({appt['duration']} menit)")
+                            st.markdown(f"**Waktu:** {appt['date']} · {appt['time']} ({appt['duration']} menit)")
                             st.markdown(f"**Lokasi:** {appt['location']}")
                         with c2:
                             st.markdown(f"**Peserta kami:** {appt['participants'] or '-'}")
                             st.markdown(f"**Peserta vendor:** {appt['vendor_participants'] or '-'}")
                             st.markdown(f"**Agenda:** {appt['agenda']}")
-
                         st.markdown("---")
-                        # Update hasil klarifikasi
                         new_status = st.selectbox(
                             "Status",
                             ["Terjadwal", "Berlangsung", "Selesai", "Dibatalkan"],
                             index=["Terjadwal", "Berlangsung", "Selesai", "Dibatalkan"].index(appt["status"]),
-                            key=f"stat_appt_{appt['id']}",
+                            key=f"as_{appt['id']}",
                         )
-                        hasil_klarifikasi = st.text_area(
-                            "Hasil klarifikasi teknis",
-                            value=appt.get("hasil", ""),
-                            placeholder=(
-                                "Contoh: Vendor sanggup semua item. Untuk item NDT butuh kontraktor "
-                                "subkon pihak ketiga. WPS akan diserahkan minggu depan."
-                            ),
-                            height=120,
-                            key=f"hasil_{appt['id']}",
-                        )
-
-                        col_save, col_del = st.columns([3, 1])
-                        with col_save:
-                            if st.button("Simpan Hasil", key=f"save_appt_{appt['id']}"):
+                        hasil = st.text_area("Hasil klarifikasi", value=appt.get("hasil", ""),
+                                             height=120, key=f"ah_{appt['id']}")
+                        cs, cd = st.columns([3, 1])
+                        with cs:
+                            if st.button("Simpan", key=f"sv_{appt['id']}"):
                                 active["appointments"][i]["status"] = new_status
-                                active["appointments"][i]["hasil"] = hasil_klarifikasi
-                                st.success("Hasil klarifikasi tersimpan.")
+                                active["appointments"][i]["hasil"] = hasil
+                                st.success("Tersimpan.")
                                 st.rerun()
-                        with col_del:
-                            if st.button("Hapus", key=f"del_appt_{appt['id']}"):
+                        with cd:
+                            if st.button("Hapus", key=f"dl_{appt['id']}"):
                                 active["appointments"].pop(i)
                                 st.rerun()
 
-    # ---------------------------------------------------------
-    # SUB-TAB 4: OPTIMASI SETELAH KLARIFIKASI
-    # ---------------------------------------------------------
+    # SUB 4
     with sub4:
-        st.markdown("### Optimasi Setelah Klarifikasi Teknis")
-
+        st.markdown("### Optimasi Setelah Klarifikasi")
         invited = active.get("invited_vendors", [])
         vendor_data = active.get("vendor_data", {})
 
-        # Validasi prasyarat
         prasyarat = []
         if not invited:
-            prasyarat.append("vendor diundang (sub-tab 1)")
+            prasyarat.append("vendor diundang")
         if not vendor_data or all(v["harga_rab"] == 0 for v in vendor_data.values()):
-            prasyarat.append("RAB vendor (sub-tab 2)")
+            prasyarat.append("RAB vendor")
         if not active["appointments"]:
-            prasyarat.append("appointment klarifikasi (sub-tab 3)")
+            prasyarat.append("appointment klarifikasi")
 
         if prasyarat:
-            st.warning("Belum bisa optimasi. Selesaikan dulu: " + ", ".join(prasyarat))
+            st.warning("Belum bisa optimasi. Selesaikan: " + ", ".join(prasyarat))
         else:
             st.caption(
-                "Optimasi mempertimbangkan: **harga RAB** (semakin murah semakin baik) "
-                "dan **skor performa** (dari penilaian vendor + hasil klarifikasi)."
+                "Optimasi pakai **normalisasi min-max** untuk harga + skor performa. "
+                "Bobot bisa diubah di sidebar."
             )
 
-            # Hitung skor performa tiap vendor
             scores = {}
             harga = {}
             for v in invited:
@@ -1091,48 +988,31 @@ elif step == 2:
                 scores[v] = avg_perf
                 harga[v] = vd.get("harga_rab", 0)
 
-            # Cek budget
-            over_budget = [v for v, h in harga.items() if h > budget]
-
-            st.markdown("#### Data Vendor untuk Optimasi")
+            st.markdown("#### Data untuk Optimasi")
             rows = []
             for v in invited:
                 rows.append({
                     "Vendor": v,
                     "RAB (juta Rp)": format_rupiah(harga[v]),
                     "Skor Performa": round(scores[v], 1),
-                    "Status": "Over budget" if v in over_budget else "OK",
                 })
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-            # Filter yang lolos budget & performa minimum
             eligible = [
                 v for v in invited
-                if harga[v] > 0
-                and harga[v] <= budget
-                and scores[v] >= min_performance
+                if harga[v] > 0 and harga[v] <= budget and scores[v] >= min_performance
             ]
 
             if not eligible:
-                st.error(
-                    f"Tidak ada vendor yang lolos kriteria. "
-                    f"Budget: {format_rupiah(budget)}, "
-                    f"Skor performa minimum: {min_performance}. "
-                    f"Cek data atau longgarkan kriteria."
-                )
+                st.error("Tidak ada vendor yang lolos kriteria.")
             else:
-                st.markdown("---")
-                st.markdown("#### Kriteria Aktif")
                 cc1, cc2, cc3, cc4 = st.columns(4)
-                cc1.metric("Budget maksimum", format_rupiah(budget))
-                cc2.metric("Skor performa minimum", f"{min_performance}")
+                cc1.metric("Budget", format_rupiah(budget))
+                cc2.metric("Min performa", f"{min_performance}")
                 cc3.metric("Bobot harga", f"{int(weight_price*100)}%")
                 cc4.metric("Bobot performa", f"{int(weight_perf*100)}%")
 
                 st.markdown("---")
-                st.markdown("#### Hasil Optimasi")
-
-                # Jalankan optimasi
                 selected_name, solver_status = solve_vendor_lp(
                     eligible, harga, budget, scores, weight_price, weight_perf
                 )
@@ -1144,14 +1024,12 @@ elif step == 2:
                     selected_score = scores[selected_name]
 
                     st.success(f"**Vendor terbaik: {selected_name}**")
-
                     r1, r2, r3, r4 = st.columns(4)
-                    r1.metric("Vendor terpilih", selected_name)
+                    r1.metric("Vendor", selected_name)
                     r2.metric("Harga RAB", format_rupiah(selected_cost))
                     r3.metric("Skor Performa", f"{selected_score:.1f}")
                     r4.metric("Sisa budget", format_rupiah(budget - selected_cost))
 
-                    # Chart perbandingan
                     chart_df = pd.DataFrame({
                         "Vendor": eligible,
                         "Harga": [harga[v] for v in eligible],
@@ -1161,12 +1039,10 @@ elif step == 2:
                     fig, ax1 = plt.subplots(figsize=(10, 4))
                     x_pos = np.arange(len(chart_df))
                     colors = ["#047857" if v == selected_name else "#1e40af" for v in chart_df["Vendor"]]
-
                     bars = ax1.bar(x_pos, chart_df["Harga"], color=colors, width=0.55, label="Harga RAB")
                     for bar, val in zip(bars, chart_df["Harga"]):
                         ax1.text(bar.get_x() + bar.get_width()/2, val + 5,
                                  f"Rp {val:,.0f} jt", ha="center", fontsize=8.5, color="#374151")
-
                     ax1.axhline(budget, linestyle="--", color="#dc2626", linewidth=1.5,
                                 label=f"Budget: {format_rupiah(budget)}")
                     ax1.set_xticks(x_pos)
@@ -1178,102 +1054,67 @@ elif step == 2:
                     ax1.spines["top"].set_visible(False)
                     ax1.spines["right"].set_visible(False)
 
-                    # Overlay performa di axis kedua
                     ax2 = ax1.twinx()
                     ax2.plot(x_pos, chart_df["Performa"], color="#f59e0b",
                              linewidth=2, marker="o", markersize=8, label="Skor Performa")
                     ax2.set_ylabel("Skor Performa", fontsize=9, color="#f59e0b")
                     ax2.tick_params(axis="y", labelcolor="#f59e0b", labelsize=9)
                     ax2.set_ylim(0, 105)
-
                     st.pyplot(fig)
                     plt.close(fig)
 
-                    # Simpan hasil optimasi sementara
                     st.session_state[f"optimized_vendor_{pid}"] = selected_name
                     st.session_state[f"optimized_cost_{pid}"] = selected_cost
                     st.session_state[f"optimized_score_{pid}"] = selected_score
 
-                    st.markdown("---")
-                    st.markdown("#### Proceed ke Deal Harga & SPK")
-                    st.caption(
-                        "Lanjut ke sub-tab 5 untuk finalisasi harga & tanda tangan SPK."
-                    )
-
-    # ---------------------------------------------------------
-    # SUB-TAB 5: DEAL HARGA & SPK
-    # ---------------------------------------------------------
+    # SUB 5
     with sub5:
         st.markdown("### Deal Harga & SPK")
-
         optimized_vendor = st.session_state.get(f"optimized_vendor_{pid}")
         optimized_cost = st.session_state.get(f"optimized_cost_{pid}", 0)
 
         if not optimized_vendor:
-            st.warning("Selesaikan optimasi di sub-tab 4 terlebih dahulu.")
+            st.warning("Selesaikan optimasi dulu (sub-tab 4).")
         else:
             st.markdown(
                 f"<div class='hint-box'>"
-                f"<b>Vendor terpilih dari optimasi:</b> {optimized_vendor}<br>"
+                f"<b>Vendor:</b> {optimized_vendor}<br>"
                 f"<b>Harga RAB awal:</b> {format_rupiah(optimized_cost)}"
                 f"</div>",
                 unsafe_allow_html=True,
             )
 
             st.markdown("---")
-            st.markdown("#### Negosiasi Harga Akhir")
-
             c1, c2 = st.columns(2)
             with c1:
                 final_price = st.number_input(
-                    "Harga kesepakatan akhir (juta Rp)",
-                    min_value=1.0,
-                    value=float(optimized_cost),
-                    step=5.0,
-                    key=f"final_price_{pid}",
-                    help="Harga final setelah negosiasi. Bisa lebih rendah dari RAB awal."
+                    "Harga kesepakatan (juta Rp)",
+                    min_value=1.0, value=float(optimized_cost), step=5.0,
+                    key=f"fp_{pid}",
                 )
             with c2:
                 saving = optimized_cost - final_price
-                st.metric("Penghematan dari RAB awal", format_rupiah(saving))
+                st.metric("Penghematan", format_rupiah(saving))
 
-            st.markdown("#### Data SPK (Surat Perintah Kerja)")
+            st.markdown("#### SPK")
             c1, c2, c3 = st.columns(3)
             with c1:
-                spk_number = st.text_input(
-                    "Nomor SPK",
-                    placeholder="SPK/KPOP/2024/001",
-                    key=f"spk_no_{pid}"
-                )
+                spk_number = st.text_input("Nomor SPK", placeholder="SPK/KPOP/2024/001", key=f"spkn_{pid}")
             with c2:
-                spk_date = st.date_input(
-                    "Tanggal SPK",
-                    date.today(),
-                    key=f"spk_date_{pid}"
-                )
+                spk_date = st.date_input("Tanggal SPK", date.today(), key=f"spkd_{pid}")
             with c3:
-                spk_signer = st.text_input(
-                    "Ditandatangani oleh",
-                    placeholder="Nama Project Manager",
-                    key=f"spk_signer_{pid}"
-                )
+                spk_signer = st.text_input("Ditandatangani oleh", placeholder="Nama PM", key=f"spks_{pid}")
 
             approval_drawing = st.radio(
                 "Status Approval Drawing Vendor",
                 ["Belum", "Diajukan", "Disetujui", "Revisi"],
-                index=0,
-                key=f"vs_approval_{pid}"
+                index=0, key=f"vsa_{pid}",
             )
 
-            st.markdown("#### Catatan Negosiasi")
             negosiasi_notes = st.text_area(
-                "Catatan",
-                placeholder="Contoh: Vendor setuju turun Rp 10 jt dengan catatan material pipa dari supplier kami.",
-                height=100,
-                key=f"nego_notes_{pid}"
+                "Catatan Negosiasi", height=100, key=f"ngn_{pid}",
             )
 
-            # Validasi
             valid = (
                 spk_number and len(spk_number.strip()) >= 5
                 and spk_signer and len(spk_signer.strip()) >= 3
@@ -1284,16 +1125,16 @@ elif step == 2:
             if not valid:
                 missing = []
                 if not (spk_number and len(spk_number.strip()) >= 5):
-                    missing.append("nomor SPK minimal 5 karakter")
+                    missing.append("nomor SPK min 5 karakter")
                 if not (spk_signer and len(spk_signer.strip()) >= 3):
                     missing.append("penandatangan SPK")
                 if approval_drawing != "Disetujui":
-                    missing.append("approval drawing harus 'Disetujui'")
+                    missing.append("approval drawing 'Disetujui'")
                 st.warning("Belum lengkap — " + "; ".join(missing))
 
-            if st.button("Simpan Keputusan & SPK", type="primary", key="btn_save_vs"):
+            if st.button("Simpan Keputusan & SPK", type="primary", key="btn_vs"):
                 if not valid:
-                    st.error("Data belum lengkap. Perbaiki dulu.")
+                    st.error("Data belum lengkap.")
                 else:
                     vd = vendor_data.get(optimized_vendor, {})
                     payload = {
@@ -1313,7 +1154,7 @@ elif step == 2:
                         "invited_vendors": len(active.get("invited_vendors", [])),
                     }
                     live_data["vendor_selection"] = payload
-                    st.success("Keputusan Vendor Selection & SPK tersimpan. Lanjut ke Site Execution...")
+                    st.success("Keputusan & SPK tersimpan. Lanjut ke Site Execution...")
                     next_step()
                     st.rerun()
 
@@ -1322,7 +1163,7 @@ elif step == 2:
 
 
 # =========================================================
-# STEP 3 — SITE EXECUTION
+# STEP 3 — SITE EXECUTION (dengan S-CURVE yang benar)
 # =========================================================
 elif step == 3:
     st.markdown("## Tahap 3 — Site Execution")
@@ -1340,30 +1181,19 @@ elif step == 3:
     selected_duration = vs.get("selected_duration", 78)
     final_cost = vs.get("selected_cost", 0)
 
-    st.caption(f"Kontraktor: {selected_vendor} · Nilai kontrak: {format_rupiah(final_cost)} · Durasi: {selected_duration} hari")
+    st.caption(
+        f"Kontraktor: {selected_vendor} · Nilai kontrak: {format_rupiah(final_cost)} · "
+        f"Durasi: {selected_duration} hari"
+    )
 
-    st.markdown("### Template S-Curve")
+    st.markdown("### Template WBS")
+    st.caption(
+        "Isi tabel item pekerjaan. **S-Curve akan dihitung pakai kernel S (sigmoid)** "
+        "per item — bukan linear. Hasilnya kurva S asli: landai → curam → landai."
+    )
 
     if active.get("wbs_data") is None:
-        active["wbs_data"] = default_items().rename(columns={
-            "Spesifikasi": "Item Pekerjaan",
-            "Volume": "Bobot (%)",
-        }).to_dict("records")
-        # fallback kalau struktur beda
-        active["wbs_data"] = [
-            {"No": 1, "Item Pekerjaan": "Persiapan & Mobilisasi", "Bobot (%)": 5.0,
-             "Mulai (minggu)": 1, "Selesai (minggu)": 3, "Realisasi (%)": 100.0},
-            {"No": 2, "Item Pekerjaan": "Pekerjaan Tanah & Pondasi", "Bobot (%)": 15.0,
-             "Mulai (minggu)": 2, "Selesai (minggu)": 6, "Realisasi (%)": 100.0},
-            {"No": 3, "Item Pekerjaan": "Fabrikasi Pipa", "Bobot (%)": 25.0,
-             "Mulai (minggu)": 4, "Selesai (minggu)": 10, "Realisasi (%)": 80.0},
-            {"No": 4, "Item Pekerjaan": "Instalasi Pipa & Support", "Bobot (%)": 30.0,
-             "Mulai (minggu)": 6, "Selesai (minggu)": 12, "Realisasi (%)": 45.0},
-            {"No": 5, "Item Pekerjaan": "Welding & NDT", "Bobot (%)": 10.0,
-             "Mulai (minggu)": 8, "Selesai (minggu)": 13, "Realisasi (%)": 20.0},
-            {"No": 6, "Item Pekerjaan": "Painting & Insulation", "Bobot (%)": 8.0,
-             "Mulai (minggu)": 10, "Selesai (minggu)": 14, "Realisasi (%)": 0.0},
-        ]
+        active["wbs_data"] = default_wbs().to_dict("records")
 
     wbs_df = pd.DataFrame(active["wbs_data"])
     wbs_edited = st.data_editor(
@@ -1403,16 +1233,35 @@ elif step == 3:
             )
 
             weeks = np.arange(1, max_week + 1)
+
+            # =========================================================
+            # PERHITUNGAN S-CURVE (pakai kernel S / sigmoid per item)
+            # =========================================================
             plan_weekly = np.zeros(max_week)
+
             for _, row in wbs_edited.iterrows():
                 w_start = int(row["Mulai (minggu)"])
                 w_end = int(row["Selesai (minggu)"])
                 bobot = float(row["Bobot (%)"])
                 span = w_end - w_start + 1
-                if span > 0:
-                    plan_weekly[w_start - 1:w_end] += bobot / span
+                if span <= 0 or bobot <= 0:
+                    continue
+
+                # Bangun kurva S untuk item ini: dari S(t=0)=0 sampai S(t=1)=bobot
+                # Nilai S per minggu dihitung dari selisih sigmoid antar minggu
+                ts = np.linspace(0, 1, span + 1)
+                s_values = np.array([sigmoid_kernel(t, k=4.0) for t in ts])
+                # Bobot per minggu = selisih kumulatif (deferensial sigmoid)
+                weekly_weights = np.diff(s_values) * bobot
+                # Normalisasi agar total = bobot (untuk amannya)
+                if weekly_weights.sum() > 0:
+                    weekly_weights = weekly_weights / weekly_weights.sum() * bobot
+
+                plan_weekly[w_start - 1:w_end] += weekly_weights
+
             plan_cum = np.cumsum(plan_weekly)
 
+            # Realisasi
             actual_weekly = np.zeros(max_week)
             for _, row in wbs_edited.iterrows():
                 w_start = int(row["Mulai (minggu)"])
@@ -1421,26 +1270,61 @@ elif step == 3:
                 realisasi_pct = float(row["Realisasi (%)"])
                 if realisasi_pct <= 0:
                     continue
+
                 target = bobot * (realisasi_pct / 100.0)
+
+                # Batasi sampai current_week
                 w_actual_end = min(current_week, w_end)
                 if w_actual_end < w_start:
                     continue
-                span_actual = w_actual_end - w_start + 1
-                actual_weekly[w_start - 1:w_actual_end] += target / span_actual
+
+                # Distribusi aktual dengan kernel S yang sama
+                ts = np.linspace(0, 1, (w_actual_end - w_start + 1) + 1)
+                s_values = np.array([sigmoid_kernel(t, k=4.0) for t in ts])
+                weekly_weights = np.diff(s_values) * target
+                if weekly_weights.sum() > 0:
+                    weekly_weights = weekly_weights / weekly_weights.sum() * target
+
+                actual_weekly[w_start - 1:w_actual_end] += weekly_weights
+
             actual_cum = np.cumsum(actual_weekly)
 
+            # =========================================================
+            # PLOT S-CURVE
+            # =========================================================
             fig, ax = plt.subplots(figsize=(12, 5))
-            ax.fill_between(weeks, plan_cum, actual_cum, where=(actual_cum < plan_cum),
+            ax.fill_between(weeks, plan_cum, actual_cum,
+                            where=(actual_cum < plan_cum),
                             color="#dc2626", alpha=0.12, label="Di bawah rencana")
-            ax.fill_between(weeks, plan_cum, actual_cum, where=(actual_cum >= plan_cum),
+            ax.fill_between(weeks, plan_cum, actual_cum,
+                            where=(actual_cum >= plan_cum),
                             color="#047857", alpha=0.12, label="Di atas rencana")
-            ax.plot(weeks, plan_cum, color="#1e40af", linewidth=2.5, marker="o", markersize=5, label="Rencana")
-            ax.plot(weeks, actual_cum, color="#dc2626", linewidth=2.5, marker="s", markersize=5, label="Realisasi")
-            ax.axvline(current_week, linestyle=":", color="#6b7280", linewidth=1.5, label=f"Minggu ini (W{current_week})")
+
+            ax.plot(weeks, plan_cum, color="#1e40af", linewidth=2.5,
+                    marker="o", markersize=5, label="Rencana (S-Curve)")
+            ax.plot(weeks, actual_cum, color="#dc2626", linewidth=2.5,
+                    marker="s", markersize=5, label="Realisasi")
+
+            ax.axvline(current_week, linestyle=":", color="#6b7280",
+                       linewidth=1.5, label=f"Minggu ini (W{current_week})")
+
             plan_now = plan_cum[current_week - 1]
             actual_now = actual_cum[current_week - 1]
-            ax.scatter([current_week], [plan_now], color="#1e40af", s=80, zorder=5, edgecolor="white", linewidth=1.5)
-            ax.scatter([current_week], [actual_now], color="#dc2626", s=80, marker="D", zorder=5, edgecolor="white", linewidth=1.5)
+
+            ax.scatter([current_week], [plan_now], color="#1e40af", s=80,
+                       zorder=5, edgecolor="white", linewidth=1.5)
+            ax.scatter([current_week], [actual_now], color="#dc2626", s=80,
+                       marker="D", zorder=5, edgecolor="white", linewidth=1.5)
+
+            ax.annotate(f"Rencana: {plan_now:.1f}%",
+                        xy=(current_week, plan_now), xytext=(10, 10),
+                        textcoords="offset points", color="#1e40af",
+                        fontsize=9, fontweight="600")
+            ax.annotate(f"Realisasi: {actual_now:.1f}%",
+                        xy=(current_week, actual_now), xytext=(10, -20),
+                        textcoords="offset points", color="#dc2626",
+                        fontsize=9, fontweight="600")
+
             ax.set_xlabel("Minggu ke-", fontsize=10)
             ax.set_ylabel("Progress Kumulatif (%)", fontsize=10)
             ax.set_title(f"S-Curve — {selected_vendor}", fontsize=12, fontweight="600")
@@ -1464,6 +1348,28 @@ elif step == 3:
             sc3.metric("Deviasi", f"{deviasi:+.1f}%")
             sc4.metric("SPI", f"{spi:.3f}")
 
+            if deviasi < -5:
+                st.error(f"Deviasi {deviasi:.1f}% — proyek berpotensi terlambat.")
+            elif deviasi < 0:
+                st.warning(f"Deviasi {deviasi:.1f}% — perlu perhatian.")
+            else:
+                st.success(f"Progress sesuai atau lebih cepat {deviasi:+.1f}%.")
+
+            with st.expander("Lihat tabel S-Curve"):
+                df_sc = pd.DataFrame({
+                    "Minggu": weeks,
+                    "Rencana (%)": np.round(plan_cum, 2),
+                    "Realisasi (%)": np.round(actual_cum, 2),
+                    "Deviasi (%)": np.round(actual_cum - plan_cum, 2),
+                })
+                st.dataframe(df_sc, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "Unduh S-Curve (CSV)",
+                    data=df_sc.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"s_curve_{meta['name'].replace(' ', '_')}.csv",
+                    mime="text/csv",
+                )
+
             st.markdown("---")
 
             col1, col2 = st.columns(2)
@@ -1480,7 +1386,7 @@ elif step == 3:
                     key="se_kendala",
                 )
                 if kendala == "Tidak ada":
-                    st.info("Tidak ada kendala — langkah penanganan tidak diperlukan.")
+                    st.info("Tidak ada kendala.")
                     aksi = "Tidak diperlukan"
                     aksi_valid = True
                 elif kendala == "Pilih kendala...":
@@ -1502,18 +1408,18 @@ elif step == 3:
             if not form_valid:
                 missing = []
                 if not pcm_valid:
-                    missing.append("catatan PCM minimal 10 karakter")
+                    missing.append("catatan PCM min 10 karakter")
                 if not kendala_valid:
                     missing.append("kendala belum dipilih")
                 if not aksi_valid:
-                    missing.append("aksi penanganan belum dipilih")
+                    missing.append("aksi belum dipilih")
                 if not kpi_valid:
                     missing.append("KPI harus > 0%")
                 st.warning("Belum lengkap — " + "; ".join(missing))
 
-            if st.button("Simpan Data Site Execution", type="primary", key="btn_save_se"):
+            if st.button("Simpan Data Site Execution", type="primary", key="btn_se"):
                 if not form_valid:
-                    st.error("Data belum lengkap. Perbaiki dulu.")
+                    st.error("Data belum lengkap.")
                 else:
                     payload = {
                         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -1547,8 +1453,7 @@ elif step == 4:
 
     st.markdown(
         "<div class='flow-hint'>"
-        "Alur: Pemberitahuan selesai → Inspeksi & commissioning → "
-        "Inspeksi akhir → BAST → Selesai."
+        "Alur: Pemberitahuan selesai → Inspeksi → Commissioning → BAST → Selesai."
         "</div>",
         unsafe_allow_html=True,
     )
@@ -1561,7 +1466,7 @@ elif step == 4:
         st.caption(f"Terakhir disimpan: {live.get('timestamp', '-')}")
         st.markdown("---")
 
-    st.markdown("#### Inspeksi Mutu & Test Commissioning")
+    st.markdown("#### Inspeksi Mutu")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         mat_insp = st.selectbox("Material", ["Pilih...", "PASS", "FAIL"], key="qc_mat")
@@ -1574,20 +1479,20 @@ elif step == 4:
 
     st.markdown("#### Inspeksi Akhir")
     final_status = st.radio(
-        "Hasil inspeksi akhir sesuai kontrak?",
+        "Sesuai kontrak?",
         ["Pilih...", "Ya", "Tidak"], index=0, key="qc_final"
     )
 
     if final_status == "Ya":
-        st.markdown("#### Berita Acara Serah Terima")
+        st.markdown("#### BAST")
         c1, c2, c3 = st.columns(3)
         with c1:
-            bast_date = st.date_input("Tanggal BAST", datetime(2024, 12, 20), key="qc_bast_date")
+            bast_date = st.date_input("Tanggal BAST", datetime(2024, 12, 20), key="qc_bd")
         with c2:
-            bast_number = st.text_input("Nomor BAST", placeholder="BAST/KPOP/2024/047", key="qc_bast_no")
+            bast_number = st.text_input("Nomor BAST", placeholder="BAST/KPOP/2024/047", key="qc_bn")
         with c3:
-            approved_by = st.text_input("Disetujui oleh", placeholder="Nama lengkap", key="qc_approver")
-        bast_notes = st.text_area("Catatan BAST", placeholder="Catatan minimal 10 karakter...", height=80, key="qc_bast_notes")
+            approved_by = st.text_input("Disetujui oleh", placeholder="Nama lengkap", key="qc_ab")
+        bast_notes = st.text_area("Catatan BAST", placeholder="Minimal 10 karakter...", height=80, key="qc_bnotes")
     else:
         bast_date = None
         bast_number = ""
@@ -1611,14 +1516,14 @@ elif step == 4:
     if not form_valid:
         missing = []
         if not inspeksi_valid:
-            missing.append("semua hasil inspeksi wajib dipilih")
+            missing.append("semua inspeksi wajib dipilih")
         if not status_valid:
-            missing.append("status inspeksi akhir belum dipilih")
+            missing.append("status akhir belum dipilih")
         if not bast_valid:
             missing.append("data BAST belum lengkap")
         st.warning("Belum lengkap — " + "; ".join(missing))
 
-    if st.button("Simpan Data Quality Control", type="primary", key="btn_save_qc"):
+    if st.button("Simpan Data Quality Control", type="primary", key="btn_qc"):
         if not form_valid:
             st.error("Data belum lengkap.")
         else:
@@ -1635,7 +1540,7 @@ elif step == 4:
                 "bast_notes": bast_notes,
             }
             live_data["quality_control"] = payload
-            st.success("Semua tahapan selesai. Project selesai.")
+            st.success("Selesai. Project diselesaikan.")
             next_step()
             st.rerun()
 
@@ -1655,49 +1560,36 @@ elif step == 5:
     qc = live_data.get("quality_control", {})
 
     if not qc or qc.get("final_status") != "Ya":
-        st.warning("Project belum sepenuhnya selesai. Kembali ke Quality Control.")
+        st.warning("Project belum selesai.")
     else:
         st.success(f"Project **{meta['name']}** selesai.")
 
-        st.markdown("---")
-        st.markdown("### Ringkasan Project")
-
         c1, c2 = st.columns(2)
         with c1:
-            st.markdown("**Informasi Project**")
+            st.markdown("**Info Project**")
             st.markdown(f"- Nama: {meta['name']}")
             st.markdown(f"- Klien: {meta['client']}")
             st.markdown(f"- Lokasi: {meta['location']}")
             st.markdown(f"- Budget: {format_rupiah(meta['budget'])}")
             st.markdown(f"- RAB Awal: {format_rupiah(meta.get('rab_awal', 0))}")
-            st.markdown(f"- Deadline: {meta['deadline']} hari")
 
         with c2:
-            st.markdown("**Hasil Akhir**")
+            st.markdown("**Hasil**")
             if vs:
-                st.markdown(f"- Vendor terpilih: {vs.get('selected_vendor', '-')}")
-                st.markdown(f"- Nilai SPK: {format_rupiah(vs.get('selected_cost', 0))}")
+                st.markdown(f"- Vendor: {vs.get('selected_vendor', '-')}")
+                st.markdown(f"- SPK: {format_rupiah(vs.get('selected_cost', 0))}")
                 st.markdown(f"- Penghematan: {format_rupiah(vs.get('saving', 0))}")
-                st.markdown(f"- Skor Performa: {vs.get('selected_performance', 0):.1f}")
-                st.markdown(f"- Appointment: {vs.get('appointment_count', 0)}")
             if se:
                 st.markdown(f"- Realisasi: {se.get('actual_pct', 0):.1f}%")
                 st.markdown(f"- SPI: {se.get('spi', 0):.3f}")
             if qc:
                 st.markdown(f"- BAST: {qc.get('bast_number', '-')}")
-                st.markdown(f"- Tanggal BAST: {qc.get('bast_date', '-')}")
 
         st.markdown("---")
-        st.markdown("### Unduh Data")
-
         c1, c2, c3 = st.columns(3)
         with c1:
-            all_data = {
-                "tender": tender,
-                "vendor_selection": vs,
-                "site_execution": se,
-                "quality_control": qc,
-            }
+            all_data = {"tender": tender, "vendor_selection": vs,
+                        "site_execution": se, "quality_control": qc}
             rows = []
             for tahap, d in all_data.items():
                 if d:
@@ -1705,7 +1597,7 @@ elif step == 5:
                     row.update({k: str(v) for k, v in d.items()})
                     rows.append(row)
             st.download_button(
-                "Unduh data project (CSV)",
+                "Unduh data (CSV)",
                 data=pd.DataFrame(rows).to_csv(index=False).encode("utf-8-sig"),
                 file_name=f"project_{meta['name'].replace(' ', '_')}.csv",
                 mime="text/csv",
@@ -1718,34 +1610,15 @@ elif step == 5:
                     file_name=f"appointments_{meta['name'].replace(' ', '_')}.csv",
                     mime="text/csv",
                 )
-        with c3:
-            if active.get("vendor_data"):
-                vendor_rows = []
-                for v, vd in active["vendor_data"].items():
-                    vendor_rows.append({
-                        "Vendor": v,
-                        "RAB (jt)": vd.get("harga_rab", 0),
-                        "Durasi": vd.get("durasi", 0),
-                        "Skor Performa": round(
-                            sum(vd["performa"].values()) / len(vd["performa"])
-                            if vd["performa"] else 0, 1
-                        ),
-                    })
-                st.download_button(
-                    "Unduh Data Vendor (CSV)",
-                    data=pd.DataFrame(vendor_rows).to_csv(index=False).encode("utf-8-sig"),
-                    file_name=f"vendors_{meta['name'].replace(' ', '_')}.csv",
-                    mime="text/csv",
-                )
 
     st.markdown("---")
-    c1, c2 = st.columns([1, 1])
+    c1, c2 = st.columns(2)
     with c1:
-        if st.button("← Kembali ke Quality Control", key="btn_back_qc"):
+        if st.button("← Kembali ke QC", key="btn_bq"):
             goto_step(4)
             st.rerun()
     with c2:
-        if st.button("Kembali ke Daftar Project", key="btn_back_list"):
+        if st.button("Kembali ke Daftar Project", key="btn_bl"):
             st.session_state.step = 0
             st.rerun()
 
