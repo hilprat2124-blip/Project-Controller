@@ -582,9 +582,9 @@ if step == 1:
         st.markdown("#### RAB Awal")
         st.markdown(
             f"<div class='hint-box'>"
-            f"Budget project di sidebar: <b>{format_rupiah(meta['budget'])}</b>. "
+            f"Budget project : <b>{format_rupiah(meta['budget'])}</b>. "
             f"Nilai RAB di bawah otomatis terisi sama dengan budget sebagai titik awal — "
-            f"ubah manual kalau RAB dari tim KPOP berbeda."
+            f"ubah manual kalau RAB dari tim KPDP berbeda."
             f"</div>",
             unsafe_allow_html=True,
         )
