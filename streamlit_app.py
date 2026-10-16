@@ -756,24 +756,35 @@ with tab3:
                         st.markdown(f"- {s}")
 
                 else:
+                    # =====================================================
+                    # OPTIMASI PULP — menggunakan argumen posisional
+                    # (kompatibel dengan PuLP 2.x, 3.x, 4.x)
+                    # =====================================================
                     model = pulp.LpProblem("Vendor_Selection", pulp.LpMinimize)
                     vendor_names = eligible["Vendor"].tolist()
-                    x = {
-                        name: pulp.LpVariable(
-                            f"select_{i}", lowBound=0, upBound=1, cat=pulp.LpInteger
-                        )
-                        for i, name in enumerate(vendor_names)
-                    }
+
+                    x = {}
+                    for i, name in enumerate(vendor_names):
+                        x[name] = pulp.LpVariable(f"select_{i}", 0, 1, pulp.LpInteger)
+
                     costs = eligible.set_index("Vendor")["Harga (juta Rp)"].to_dict()
                     model += pulp.lpSum(costs[n] * x[n] for n in vendor_names)
                     model += pulp.lpSum(x[n] for n in vendor_names) == 1
                     model += pulp.lpSum(costs[n] * x[n] for n in vendor_names) <= budget
-                    model.solve(pulp.PULP_CBC_CMD(msg=False))
+
+                    try:
+                        model.solve(pulp.PULP_CBC_CMD(msg=False))
+                    except Exception as e:
+                        st.error(f"Solver error: {e}")
+                        st.stop()
 
                     if pulp.LpStatus[model.status] != "Optimal":
                         st.error(f"Optimasi gagal: {pulp.LpStatus[model.status]}")
                     else:
-                        selected_names = [n for n in vendor_names if pulp.value(x[n]) > 0.5]
+                        selected_names = [
+                            n for n in vendor_names
+                            if pulp.value(x[n]) is not None and pulp.value(x[n]) > 0.5
+                        ]
                         selected = eligible[eligible["Vendor"].isin(selected_names)]
                         best = selected.iloc[0]
                         selected_cost = float(best["Harga (juta Rp)"])
