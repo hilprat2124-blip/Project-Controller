@@ -106,6 +106,37 @@ st.markdown("""
         font-size: 0.82rem; color: #4b5563;
         margin-bottom: 12px;
     }
+    /* S-Curve table */
+    .sc-table {
+        font-size: 0.78rem;
+        border-collapse: collapse;
+        width: 100%;
+    }
+    .sc-table th, .sc-table td {
+        border: 1px solid #d1d5db;
+        padding: 4px 8px;
+        text-align: center;
+    }
+    .sc-table th {
+        background: #1e40af;
+        color: white;
+        font-weight: 600;
+    }
+    .sc-table td.text-left {
+        text-align: left;
+    }
+    .sc-table tr.total-row td {
+        background: #fef3c7;
+        font-weight: 600;
+    }
+    .sc-table tr.cum-row td {
+        background: #dbeafe;
+        font-weight: 600;
+    }
+    .sc-table tr.actual-cum-row td {
+        background: #fecaca;
+        font-weight: 600;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -174,7 +205,6 @@ def solve_vendor_lp(vendor_names, costs, budget, scores=None,
         )
         prob += pulp.lpSum(x[n] for n in vendor_names) == 1
         prob += pulp.lpSum(costs[n] * x[n] for n in vendor_names) <= budget
-
         prob.solve()
         status = pulp.LpStatus.get(prob.status, "Unknown")
         if status != "Optimal":
@@ -284,21 +314,30 @@ def default_items():
 
 
 def default_wbs():
+    # Default 7 item pekerjaan dengan harga, bobot, dan rentang minggu
     return pd.DataFrame([
-        {"No": 1, "Item Pekerjaan": "Persiapan & Mobilisasi", "Bobot (%)": 5.0,
-         "Mulai (minggu)": 1, "Selesai (minggu)": 3, "Realisasi (%)": 100.0},
-        {"No": 2, "Item Pekerjaan": "Pekerjaan Tanah & Pondasi", "Bobot (%)": 15.0,
-         "Mulai (minggu)": 2, "Selesai (minggu)": 6, "Realisasi (%)": 100.0},
-        {"No": 3, "Item Pekerjaan": "Fabrikasi Pipa", "Bobot (%)": 25.0,
-         "Mulai (minggu)": 4, "Selesai (minggu)": 10, "Realisasi (%)": 80.0},
-        {"No": 4, "Item Pekerjaan": "Instalasi Pipa & Support", "Bobot (%)": 30.0,
-         "Mulai (minggu)": 6, "Selesai (minggu)": 12, "Realisasi (%)": 45.0},
-        {"No": 5, "Item Pekerjaan": "Welding & NDT", "Bobot (%)": 10.0,
-         "Mulai (minggu)": 8, "Selesai (minggu)": 13, "Realisasi (%)": 20.0},
-        {"No": 6, "Item Pekerjaan": "Painting & Insulation", "Bobot (%)": 8.0,
-         "Mulai (minggu)": 10, "Selesai (minggu)": 14, "Realisasi (%)": 0.0},
-        {"No": 7, "Item Pekerjaan": "Testing, Commissioning & Handover", "Bobot (%)": 7.0,
-         "Mulai (minggu)": 12, "Selesai (minggu)": 15, "Realisasi (%)": 0.0},
+        {"No": "A", "Item Pekerjaan": "Pekerjaan Persiapan", "Harga (juta Rp)": 28.0,
+         "Mulai": 1, "Selesai": 4, "Realisasi (%)": 100.0},
+        {"No": "B", "Item Pekerjaan": "Pekerjaan Tanah", "Harga (juta Rp)": 38.0,
+         "Mulai": 2, "Selesai": 6, "Realisasi (%)": 100.0},
+        {"No": "C", "Item Pekerjaan": "Pekerjaan Struktur", "Harga (juta Rp)": 60.0,
+         "Mulai": 4, "Selesai": 9, "Realisasi (%)": 85.0},
+        {"No": "D", "Item Pekerjaan": "Pekerjaan Dinding", "Harga (juta Rp)": 32.0,
+         "Mulai": 5, "Selesai": 10, "Realisasi (%)": 60.0},
+        {"No": "E", "Item Pekerjaan": "Pekerjaan Atap", "Harga (juta Rp)": 20.0,
+         "Mulai": 6, "Selesai": 11, "Realisasi (%)": 45.0},
+        {"No": "F", "Item Pekerjaan": "Pekerjaan Plesteran", "Harga (juta Rp)": 16.0,
+         "Mulai": 8, "Selesai": 12, "Realisasi (%)": 20.0},
+        {"No": "G", "Item Pekerjaan": "Pekerjaan Acian", "Harga (juta Rp)": 12.0,
+         "Mulai": 9, "Selesai": 13, "Realisasi (%)": 10.0},
+        {"No": "H", "Item Pekerjaan": "Pekerjaan Pintu", "Harga (juta Rp)": 24.0,
+         "Mulai": 10, "Selesai": 14, "Realisasi (%)": 0.0},
+        {"No": "I", "Item Pekerjaan": "Pekerjaan Plafond", "Harga (juta Rp)": 20.0,
+         "Mulai": 10, "Selesai": 14, "Realisasi (%)": 0.0},
+        {"No": "J", "Item Pekerjaan": "Pekerjaan Lantai", "Harga (juta Rp)": 20.0,
+         "Mulai": 11, "Selesai": 15, "Realisasi (%)": 0.0},
+        {"No": "K", "Item Pekerjaan": "Pekerjaan Pengecatan", "Harga (juta Rp)": 16.0,
+         "Mulai": 12, "Selesai": 16, "Realisasi (%)": 0.0},
     ])
 
 
@@ -393,7 +432,6 @@ with st.sidebar:
         min_performance = st.slider("Skor performa minimum", 0, 100, 70, key="min_perf")
         budget_weight = st.slider(
             "Bobot harga vs performa (%)", 0, 100, 50, key="weight_price",
-            help="50% = harga & performa seimbang."
         )
         weight_price = budget_weight / 100
         weight_perf = 1 - weight_price
@@ -629,8 +667,8 @@ if step == 1:
     with sub2:
         st.markdown("### BOQ — Bill of Quantities")
         st.caption(
-            "📝 **Tabel ini bisa diedit langsung** — tambah baris, hapus, ubah nama item, volume, "
-            "satuan, spesifikasi, dan kompleksitas. Klik ikon ➕ di bawah tabel untuk tambah baris baru."
+            "📝 **Tabel ini bisa diedit langsung** — tambah baris, hapus, ubah nama item, "
+            "volume, satuan, spesifikasi, dan kompleksitas."
         )
 
         if active.get("items_data") is None:
@@ -641,38 +679,20 @@ if step == 1:
             items_df,
             use_container_width=True,
             hide_index=True,
-            num_rows="dynamic",  # ← ini yang bikin bisa tambah/hapus baris
+            num_rows="dynamic",
             key=f"items_editor_{pid}",
             column_config={
-                "No": st.column_config.NumberColumn(
-                    "No", min_value=1, step=1, width="small",
-                    help="Nomor urut item."
-                ),
-                "Item Pekerjaan": st.column_config.TextColumn(
-                    "Item Pekerjaan", required=True, width="large",
-                    help="Nama pekerjaan."
-                ),
-                "Volume": st.column_config.TextColumn(
-                    "Volume", width="small",
-                    help="Bisa angka atau teks (mis: '500' atau '500-600')."
-                ),
-                "Satuan": st.column_config.TextColumn(
-                    "Satuan", width="small",
-                    help="m, joint, titik, unit, m², dll."
-                ),
-                "Spesifikasi": st.column_config.TextColumn(
-                    "Spesifikasi", width="medium",
-                    help="Standar/kode spesifikasi."
-                ),
+                "No": st.column_config.NumberColumn("No", min_value=1, step=1, width="small"),
+                "Item Pekerjaan": st.column_config.TextColumn("Item Pekerjaan", required=True, width="large"),
+                "Volume": st.column_config.TextColumn("Volume", width="small"),
+                "Satuan": st.column_config.TextColumn("Satuan", width="small"),
+                "Spesifikasi": st.column_config.TextColumn("Spesifikasi", width="medium"),
                 "Kompleksitas": st.column_config.SelectboxColumn(
-                    "Kompleksitas",
-                    options=["Rendah", "Sedang", "Tinggi"],
-                    width="small",
+                    "Kompleksitas", options=["Rendah", "Sedang", "Tinggi"], width="small"
                 ),
             },
         )
         active["items_data"] = items_edited.to_dict("records")
-
         st.caption(f"Total item: **{len(items_edited)}**")
 
     dokumen_lengkap = all([doc_drawing, doc_rks, doc_spek, doc_boq, doc_k3])
@@ -753,7 +773,6 @@ elif step == 2:
             st.warning("BOQ belum diisi. Kembali ke Tahap 1.")
         else:
             st.dataframe(pd.DataFrame(items_data), use_container_width=True, hide_index=True)
-            st.caption(f"Total item: **{len(items_data)}**")
 
         st.markdown("---")
         st.markdown("### Vendor yang Diundang")
@@ -1020,39 +1039,6 @@ elif step == 2:
                     r3.metric("Skor Performa", f"{selected_score:.1f}")
                     r4.metric("Sisa budget", format_rupiah(budget - selected_cost))
 
-                    chart_df = pd.DataFrame({
-                        "Vendor": eligible,
-                        "Harga": [harga[v] for v in eligible],
-                        "Performa": [scores[v] for v in eligible],
-                    }).sort_values("Harga")
-
-                    fig, ax1 = plt.subplots(figsize=(10, 4))
-                    x_pos = np.arange(len(chart_df))
-                    colors = ["#047857" if v == selected_name else "#1e40af" for v in chart_df["Vendor"]]
-                    bars = ax1.bar(x_pos, chart_df["Harga"], color=colors, width=0.55, label="Harga RAB")
-                    for bar, val in zip(bars, chart_df["Harga"]):
-                        ax1.text(bar.get_x() + bar.get_width()/2, val + 5,
-                                 f"Rp {val:,.0f} jt", ha="center", fontsize=8.5, color="#374151")
-                    ax1.axhline(budget, linestyle="--", color="#dc2626", linewidth=1.5,
-                                label=f"Budget: {format_rupiah(budget)}")
-                    ax1.set_xticks(x_pos)
-                    ax1.set_xticklabels(chart_df["Vendor"], rotation=15, ha="right", fontsize=9)
-                    ax1.set_ylabel("Harga RAB (juta Rp)", fontsize=9)
-                    ax1.tick_params(labelsize=9)
-                    ax1.legend(fontsize=9, loc="upper left")
-                    ax1.grid(axis="y", alpha=0.25)
-                    ax1.spines["top"].set_visible(False)
-                    ax1.spines["right"].set_visible(False)
-
-                    ax2 = ax1.twinx()
-                    ax2.plot(x_pos, chart_df["Performa"], color="#f59e0b",
-                             linewidth=2, marker="o", markersize=8, label="Skor Performa")
-                    ax2.set_ylabel("Skor Performa", fontsize=9, color="#f59e0b")
-                    ax2.tick_params(axis="y", labelcolor="#f59e0b", labelsize=9)
-                    ax2.set_ylim(0, 105)
-                    st.pyplot(fig)
-                    plt.close(fig)
-
                     st.session_state[f"optimized_vendor_{pid}"] = selected_name
                     st.session_state[f"optimized_cost_{pid}"] = selected_cost
                     st.session_state[f"optimized_score_{pid}"] = selected_score
@@ -1073,7 +1059,6 @@ elif step == 2:
                 unsafe_allow_html=True,
             )
 
-            st.markdown("---")
             c1, c2 = st.columns(2)
             with c1:
                 final_price = st.number_input(
@@ -1150,276 +1135,388 @@ elif step == 2:
 
 
 # =========================================================
-# STEP 3 — SITE EXECUTION (S-Curve benar)
+# STEP 3 — SITE EXECUTION (S-CURVE TABEL + GRAFIK)
 # =========================================================
 elif step == 3:
     st.markdown("## Tahap 3 — Site Execution")
     st.markdown(
         "<div class='flow-hint'>"
-        "Alur: PCM → Mobilisasi → Konstruksi → Monitoring S-Curve → Analisa kendala → KPI."
+        "Isi tabel WBS item pekerjaan — tiap item punya harga, bobot, dan rentang minggu. "
+        "Sistem akan hitung distribusi bobot per minggu, total per minggu, dan progress kumulatif "
+        "dalam format tabel seperti Excel, plus grafik S-Curve."
         "</div>",
         unsafe_allow_html=True,
     )
 
     vs = live_data.get("vendor_selection", {})
     selected_vendor = vs.get("selected_vendor", "-")
-    selected_duration = vs.get("selected_duration", 78)
     final_cost = vs.get("selected_cost", 0)
 
     st.caption(
-        f"Kontraktor: {selected_vendor} · Nilai kontrak: {format_rupiah(final_cost)} · "
-        f"Durasi: {selected_duration} hari"
+        f"Kontraktor: {selected_vendor} · Nilai kontrak: {format_rupiah(final_cost)}"
     )
 
-    st.markdown("### Template WBS")
-    st.caption(
-        "Isi tabel item pekerjaan. **S-Curve pakai kernel S (sigmoid)** — "
-        "kurva rencana & realisasi keduanya berbentuk S asli."
-    )
+    # ---------------------------------------------------------
+    # TABEL WBS dengan harga (bisa diedit)
+    # ---------------------------------------------------------
+    st.markdown("### Tabel Rencana Kerja (WBS)")
 
     if active.get("wbs_data") is None:
         active["wbs_data"] = default_wbs().to_dict("records")
 
     wbs_df = pd.DataFrame(active["wbs_data"])
     wbs_edited = st.data_editor(
-        wbs_df, use_container_width=True, hide_index=True,
-        num_rows="dynamic", key=f"wbs_editor_{pid}",
+        wbs_df,
+        use_container_width=True,
+        hide_index=True,
+        num_rows="dynamic",
+        key=f"wbs_editor_{pid}",
         column_config={
-            "No": st.column_config.NumberColumn("No", min_value=1, step=1, width="small"),
-            "Item Pekerjaan": st.column_config.TextColumn("Item Pekerjaan", required=True, width="large"),
-            "Bobot (%)": st.column_config.NumberColumn("Bobot (%)", min_value=0.0, max_value=100.0, step=0.5, format="%.1f"),
-            "Mulai (minggu)": st.column_config.NumberColumn("Mulai (minggu)", min_value=1, step=1, width="small"),
-            "Selesai (minggu)": st.column_config.NumberColumn("Selesai (minggu)", min_value=1, step=1, width="small"),
-            "Realisasi (%)": st.column_config.NumberColumn("Realisasi (%)", min_value=0.0, max_value=100.0, step=1.0, format="%.1f"),
+            "No": st.column_config.TextColumn("No", width="small", help="Nomor/abjad urut (A, B, C atau 1, 2, 3)"),
+            "Item Pekerjaan": st.column_config.TextColumn("Uraian Pekerjaan", required=True, width="large"),
+            "Harga (juta Rp)": st.column_config.NumberColumn(
+                "Harga (juta Rp)", min_value=0.0, step=1.0, format="%.1f",
+            ),
+            "Mulai": st.column_config.NumberColumn("Mulai (M)", min_value=1, step=1, width="small"),
+            "Selesai": st.column_config.NumberColumn("Selesai (M)", min_value=1, step=1, width="small"),
+            "Realisasi (%)": st.column_config.NumberColumn(
+                "Real. (%)", min_value=0.0, max_value=100.0, step=1.0, format="%.1f",
+            ),
         },
     )
     active["wbs_data"] = wbs_edited.to_dict("records")
 
-    if not wbs_edited.empty:
-        total_bobot = float(wbs_edited["Bobot (%)"].sum())
-        max_week = int(wbs_edited["Selesai (minggu)"].max())
+    if wbs_edited.empty:
+        st.warning("Tabel WBS kosong.")
+        render_nav(show_next=False)
+        st.stop()
 
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Total Bobot", f"{total_bobot:.1f}%",
-                  delta=f"{total_bobot - 100:+.1f}%" if abs(total_bobot - 100) > 0.1 else "OK")
-        c2.metric("Jumlah Item", len(wbs_edited))
-        c3.metric("Durasi", f"{max_week} minggu")
+    # ---------------------------------------------------------
+    # HITUNG BOBOT OTOMATIS dari harga
+    # ---------------------------------------------------------
+    total_harga = float(wbs_edited["Harga (juta Rp)"].sum())
+    if total_harga > 0:
+        wbs_edited["Bobot (%)"] = (wbs_edited["Harga (juta Rp)"] / total_harga * 100).round(2)
+    else:
+        wbs_edited["Bobot (%)"] = 0.0
 
-        if abs(total_bobot - 100) > 0.1:
-            st.warning(f"Total bobot = {total_bobot:.1f}%. Sebaiknya 100%.")
+    # ---------------------------------------------------------
+    # HITUNG DISTRIBUSI BOBOT PER MINGGU (format tabel)
+    # ---------------------------------------------------------
+    max_week = int(wbs_edited["Selesai"].max())
+    weeks = list(range(1, max_week + 1))
 
-        invalid_rows = wbs_edited[wbs_edited["Mulai (minggu)"] > wbs_edited["Selesai (minggu)"]]
-        if invalid_rows.empty:
-            current_week = st.number_input(
-                "Minggu saat ini",
-                min_value=1, max_value=max_week,
-                value=min(max_week, max(1, int(max_week * 0.65))),
-                step=1, key=f"current_week_{pid}",
-            )
+    # matrix distribusi: rows = item, cols = minggu
+    distrib_matrix = []
+    for _, row in wbs_edited.iterrows():
+        w_start = int(row["Mulai"])
+        w_end = int(row["Selesai"])
+        bobot = float(row["Bobot (%)"])
+        span = w_end - w_start + 1
 
-            weeks = np.arange(1, max_week + 1)
+        week_vals = [0.0] * max_week
+        if span > 0 and bobot > 0:
+            ts = np.linspace(0, 1, span + 1)
+            s_vals = np.array([sigmoid_kernel(t, k=4.0) for t in ts])
+            weekly = np.diff(s_vals) * bobot
+            if weekly.sum() > 0:
+                weekly = weekly / weekly.sum() * bobot
+            for i, w in enumerate(range(w_start, w_end + 1)):
+                week_vals[w - 1] = round(float(weekly[i]), 2)
+        distrib_matrix.append(week_vals)
 
-            # =========================================================
-            # RENCANA — distribusi bobot via kernel S
-            # =========================================================
-            plan_weekly = np.zeros(max_week)
-            for _, row in wbs_edited.iterrows():
-                w_start = int(row["Mulai (minggu)"])
-                w_end = int(row["Selesai (minggu)"])
-                bobot = float(row["Bobot (%)"])
-                span = w_end - w_start + 1
-                if span <= 0 or bobot <= 0:
-                    continue
-                ts = np.linspace(0, 1, span + 1)
-                s_values = np.array([sigmoid_kernel(t, k=4.0) for t in ts])
-                weekly_weights = np.diff(s_values) * bobot
-                if weekly_weights.sum() > 0:
-                    weekly_weights = weekly_weights / weekly_weights.sum() * bobot
-                plan_weekly[w_start - 1:w_end] += weekly_weights
-            plan_cum = np.cumsum(plan_weekly)
+    # total per minggu
+    total_per_week = np.sum(distrib_matrix, axis=0).round(2)
+    cum_plan = np.cumsum(total_per_week).round(2)
 
-            # =========================================================
-            # REALISASI — pakai kurva S yang sama, cut-off di current_week
-            # =========================================================
-            actual_weekly = np.zeros(max_week)
-            for _, row in wbs_edited.iterrows():
-                w_start = int(row["Mulai (minggu)"])
-                w_end = int(row["Selesai (minggu)"])
-                bobot = float(row["Bobot (%)"])
-                realisasi_pct = float(row["Realisasi (%)"])
-                if realisasi_pct <= 0:
-                    continue
-                span = w_end - w_start + 1
-                if span <= 0:
-                    continue
+    # ---------------------------------------------------------
+    # REALISASI PER MINGGU (pakai kurva S yang sama, cut-off)
+    # ---------------------------------------------------------
+    current_week = st.number_input(
+        "Minggu saat ini (untuk realisasi)",
+        min_value=1, max_value=max_week,
+        value=min(max_week, max(1, int(max_week * 0.6))),
+        step=1, key=f"current_week_{pid}",
+    )
 
-                # Bangun kurva S PENUH item ini (seluruh rentang)
-                ts_full = np.linspace(0, 1, span + 1)
-                s_full = np.array([sigmoid_kernel(t, k=4.0) for t in ts_full])
-                weekly_plan = np.diff(s_full) * bobot  # bobot rencana per minggu (bentuk S)
+    distrib_actual = []
+    for idx, row in wbs_edited.iterrows():
+        w_start = int(row["Mulai"])
+        w_end = int(row["Selesai"])
+        bobot = float(row["Bobot (%)"])
+        realisasi_pct = float(row["Realisasi (%)"])
+        span = w_end - w_start + 1
 
-                # Realisasi mingguan = bentuk S yang sama, skalanya × (realisasi_pct/100)
-                weekly_actual_full = weekly_plan * (realisasi_pct / 100.0)
+        week_vals = [0.0] * max_week
+        if span > 0 and bobot > 0 and realisasi_pct > 0:
+            # bentuk S penuh
+            ts = np.linspace(0, 1, span + 1)
+            s_vals = np.array([sigmoid_kernel(t, k=4.0) for t in ts])
+            weekly_plan = np.diff(s_vals) * bobot
+            if weekly_plan.sum() > 0:
+                weekly_plan = weekly_plan / weekly_plan.sum() * bobot
 
-                # Cut-off: hanya sampai current_week
-                w_cut = min(current_week, w_end)
-                if w_cut < w_start:
-                    continue
-                actual_weekly[w_start - 1:w_cut] += weekly_actual_full[:w_cut - w_start + 1]
+            # realisasi = bentuk S yang sama × (realisasi_pct/100)
+            weekly_actual_full = weekly_plan * (realisasi_pct / 100.0)
 
-            actual_cum = np.cumsum(actual_weekly)
+            # cut-off di current_week
+            w_cut = min(current_week, w_end)
+            if w_cut >= w_start:
+                for i, w in enumerate(range(w_start, w_cut + 1)):
+                    week_vals[w - 1] = round(float(weekly_actual_full[i]), 2)
+        distrib_actual.append(week_vals)
 
-            # =========================================================
-            # PLOT
-            # =========================================================
-            fig, ax = plt.subplots(figsize=(12, 5))
-            ax.fill_between(weeks, plan_cum, actual_cum,
-                            where=(actual_cum < plan_cum),
-                            color="#dc2626", alpha=0.12, label="Di bawah rencana")
-            ax.fill_between(weeks, plan_cum, actual_cum,
-                            where=(actual_cum >= plan_cum),
-                            color="#047857", alpha=0.12, label="Di atas rencana")
+    total_actual_per_week = np.sum(distrib_actual, axis=0).round(2)
+    cum_actual = np.cumsum(total_actual_per_week).round(2)
 
-            ax.plot(weeks, plan_cum, color="#1e40af", linewidth=2.5,
-                    marker="o", markersize=5, label="Rencana (S-Curve)")
-            ax.plot(weeks, actual_cum, color="#dc2626", linewidth=2.5,
-                    marker="s", markersize=5, label="Realisasi")
+    # ---------------------------------------------------------
+    # TAMPILKAN TABEL S-CURVE (HTML custom untuk rapi)
+    # ---------------------------------------------------------
+    st.markdown("### Tabel S-Curve Mingguan")
 
-            ax.axvline(current_week, linestyle=":", color="#6b7280",
-                       linewidth=1.5, label=f"Minggu ini (W{current_week})")
+    # Header
+    header_cells = (
+        "<th style='text-align:left;'>No</th>"
+        "<th style='text-align:left;'>Uraian Pekerjaan</th>"
+        "<th>Harga</th>"
+        "<th>Bobot</th>"
+    )
+    for w in weeks:
+        header_cells += f"<th>M{w}</th>"
 
-            plan_now = plan_cum[current_week - 1]
-            actual_now = actual_cum[current_week - 1]
-
-            ax.scatter([current_week], [plan_now], color="#1e40af", s=80,
-                       zorder=5, edgecolor="white", linewidth=1.5)
-            ax.scatter([current_week], [actual_now], color="#dc2626", s=80,
-                       marker="D", zorder=5, edgecolor="white", linewidth=1.5)
-
-            ax.annotate(f"Rencana: {plan_now:.1f}%",
-                        xy=(current_week, plan_now), xytext=(10, 10),
-                        textcoords="offset points", color="#1e40af",
-                        fontsize=9, fontweight="600")
-            ax.annotate(f"Realisasi: {actual_now:.1f}%",
-                        xy=(current_week, actual_now), xytext=(10, -20),
-                        textcoords="offset points", color="#dc2626",
-                        fontsize=9, fontweight="600")
-
-            ax.set_xlabel("Minggu ke-", fontsize=10)
-            ax.set_ylabel("Progress Kumulatif (%)", fontsize=10)
-            ax.set_title(f"S-Curve — {selected_vendor}", fontsize=12, fontweight="600")
-            ax.set_ylim(0, 105)
-            ax.set_xlim(1, max_week)
-            ax.set_xticks(weeks)
-            ax.tick_params(labelsize=9)
-            ax.legend(fontsize=9, loc="lower right")
-            ax.grid(alpha=0.25)
-            ax.spines["top"].set_visible(False)
-            ax.spines["right"].set_visible(False)
-            st.pyplot(fig)
-            plt.close(fig)
-
-            deviasi = actual_now - plan_now
-            spi = actual_now / plan_now if plan_now > 0 else 0
-
-            sc1, sc2, sc3, sc4 = st.columns(4)
-            sc1.metric(f"Rencana (W{current_week})", f"{plan_now:.1f}%")
-            sc2.metric(f"Realisasi (W{current_week})", f"{actual_now:.1f}%")
-            sc3.metric("Deviasi", f"{deviasi:+.1f}%")
-            sc4.metric("SPI", f"{spi:.3f}")
-
-            if deviasi < -5:
-                st.error(f"Deviasi {deviasi:.1f}% — berpotensi terlambat.")
-            elif deviasi < 0:
-                st.warning(f"Deviasi {deviasi:.1f}% — perlu perhatian.")
+    # Baris item
+    body_rows = ""
+    for i, row in wbs_edited.iterrows():
+        body_rows += "<tr>"
+        body_rows += f"<td class='text-left'>{row['No']}</td>"
+        body_rows += f"<td class='text-left'>{row['Item Pekerjaan']}</td>"
+        body_rows += f"<td>Rp {row['Harga (juta Rp)']:,.0f}</td>"
+        body_rows += f"<td>{row['Bobot (%)']:.2f}%</td>"
+        for w_idx in range(max_week):
+            val = distrib_matrix[i][w_idx]
+            if val > 0:
+                body_rows += f"<td>{val:.2f}%</td>"
             else:
-                st.success(f"Progress sesuai/lebih cepat {deviasi:+.1f}%.")
+                body_rows += "<td>-</td>"
+        body_rows += "</tr>"
 
-            with st.expander("Lihat tabel S-Curve"):
-                df_sc = pd.DataFrame({
-                    "Minggu": weeks,
-                    "Rencana (%)": np.round(plan_cum, 2),
-                    "Realisasi (%)": np.round(actual_cum, 2),
-                    "Deviasi (%)": np.round(actual_cum - plan_cum, 2),
-                })
-                st.dataframe(df_sc, use_container_width=True, hide_index=True)
-                st.download_button(
-                    "Unduh S-Curve (CSV)",
-                    data=df_sc.to_csv(index=False).encode("utf-8-sig"),
-                    file_name=f"s_curve_{meta['name'].replace(' ', '_')}.csv",
-                    mime="text/csv",
-                )
+    # Baris Total
+    body_rows += "<tr class='total-row'>"
+    body_rows += "<td class='text-left'></td>"
+    body_rows += "<td class='text-left'>Total</td>"
+    body_rows += f"<td>Rp {total_harga:,.0f}</td>"
+    body_rows += "<td>100.00%</td>"
+    for val in total_per_week:
+        body_rows += f"<td>{val:.2f}%</td>" if val > 0 else "<td>-</td>"
+    body_rows += "</tr>"
 
-            st.markdown("---")
+    # Baris Progress Rencana Kumulatif
+    body_rows += "<tr class='cum-row'>"
+    body_rows += "<td class='text-left'></td>"
+    body_rows += "<td class='text-left'>Progress Rencana Kumulatif</td>"
+    body_rows += "<td></td><td></td>"
+    for val in cum_plan:
+        body_rows += f"<td>{val:.2f}%</td>"
+    body_rows += "</tr>"
 
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown("#### Pre Construction Meeting")
-                pcm_date = st.date_input("Tanggal PCM", datetime(2024, 10, 1), key="se_pcm_date")
-                pcm_notes = st.text_area("Catatan PCM", placeholder="Minimal 10 karakter...", height=100, key="se_pcm_notes")
-            with col2:
-                st.markdown("#### Analisa Kendala")
-                kendala = st.selectbox(
-                    "Kendala utama",
-                    ["Pilih kendala...", "Tidak ada", "Perubahan desain",
-                     "Keterlambatan material", "Cuaca ekstrem", "Akses terbatas"],
-                    key="se_kendala",
-                )
-                if kendala == "Tidak ada":
-                    st.info("Tidak ada kendala.")
-                    aksi = "Tidak diperlukan"
-                    aksi_valid = True
-                elif kendala == "Pilih kendala...":
-                    aksi = None
-                    aksi_valid = False
-                else:
-                    aksi = st.radio("Langkah penanganan", [
-                        "Pilih aksi...", "Evaluasi dengan klien", "Revisi gambar kerja",
-                        "Pengukuran ulang aktual", "Konsultasi GSB & GSJ",
-                    ], key="se_aksi")
-                    aksi_valid = aksi != "Pilih aksi..."
-                kpi = st.slider("KPI kontraktor (%)", 0, 100, 0, key="se_kpi")
+    # Baris Total Realisasi per Minggu
+    body_rows += "<tr>"
+    body_rows += "<td class='text-left'></td>"
+    body_rows += "<td class='text-left'>Total Realisasi per Minggu</td>"
+    body_rows += "<td></td><td></td>"
+    for val in total_actual_per_week:
+        body_rows += f"<td>{val:.2f}%</td>" if val > 0 else "<td>-</td>"
+    body_rows += "</tr>"
 
-            pcm_valid = len(pcm_notes.strip()) >= 10
-            kendala_valid = kendala != "Pilih kendala..."
-            kpi_valid = kpi > 0
-            form_valid = pcm_valid and kendala_valid and aksi_valid and kpi_valid
+    # Baris Progress Realisasi Kumulatif
+    body_rows += "<tr class='actual-cum-row'>"
+    body_rows += "<td class='text-left'></td>"
+    body_rows += "<td class='text-left'>Progress Realisasi Kumulatif</td>"
+    body_rows += "<td></td><td></td>"
+    for val in cum_actual:
+        body_rows += f"<td>{val:.2f}%</td>"
+    body_rows += "</tr>"
 
-            if not form_valid:
-                missing = []
-                if not pcm_valid:
-                    missing.append("catatan PCM min 10 karakter")
-                if not kendala_valid:
-                    missing.append("kendala belum dipilih")
-                if not aksi_valid:
-                    missing.append("aksi belum dipilih")
-                if not kpi_valid:
-                    missing.append("KPI harus > 0%")
-                st.warning("Belum lengkap — " + "; ".join(missing))
+    table_html = f"""
+    <div style='overflow-x:auto;'>
+        <table class='sc-table'>
+            <thead><tr>{header_cells}</tr></thead>
+            <tbody>{body_rows}</tbody>
+        </table>
+    </div>
+    """
+    st.markdown(table_html, unsafe_allow_html=True)
 
-            if st.button("Simpan Data Site Execution", type="primary", key="btn_se"):
-                if not form_valid:
-                    st.error("Data belum lengkap.")
-                else:
-                    payload = {
-                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "vendor": selected_vendor,
-                        "current_week": current_week,
-                        "plan_pct": float(plan_now),
-                        "actual_pct": float(actual_now),
-                        "deviation_pct": float(deviasi),
-                        "spi": float(spi),
-                        "pcm_date": str(pcm_date),
-                        "pcm_notes": pcm_notes,
-                        "kendala": kendala,
-                        "aksi": aksi,
-                        "kpi": kpi,
-                        "wbs_count": len(wbs_edited),
-                    }
-                    live_data["site_execution"] = payload
-                    st.success("Site Execution tersimpan. Lanjut ke Quality Control...")
-                    next_step()
-                    st.rerun()
+    # ---------------------------------------------------------
+    # GRAFIK S-CURVE
+    # ---------------------------------------------------------
+    st.markdown("### Grafik S-Curve")
+
+    fig, ax = plt.subplots(figsize=(13, 5.5))
+    ax.fill_between(weeks, cum_plan, cum_actual,
+                    where=(cum_actual < cum_plan),
+                    color="#dc2626", alpha=0.12, label="Deviasi negatif")
+    ax.fill_between(weeks, cum_plan, cum_actual,
+                    where=(cum_actual >= cum_plan),
+                    color="#047857", alpha=0.12, label="Deviasi positif")
+
+    ax.plot(weeks, cum_plan, color="#1e40af", linewidth=2.5,
+            marker="o", markersize=6, label="Rencana (S-Curve)")
+    ax.plot(weeks, cum_actual, color="#dc2626", linewidth=2.5,
+            marker="s", markersize=6, label="Realisasi")
+
+    ax.axvline(current_week, linestyle=":", color="#6b7280",
+               linewidth=1.5, label=f"Minggu ini (M{current_week})")
+
+    plan_now = cum_plan[current_week - 1]
+    actual_now = cum_actual[current_week - 1]
+
+    ax.scatter([current_week], [plan_now], color="#1e40af", s=100,
+               zorder=5, edgecolor="white", linewidth=2)
+    ax.scatter([current_week], [actual_now], color="#dc2626", s=100,
+               marker="D", zorder=5, edgecolor="white", linewidth=2)
+
+    ax.annotate(f"Rencana: {plan_now:.2f}%",
+                xy=(current_week, plan_now), xytext=(10, 10),
+                textcoords="offset points", color="#1e40af",
+                fontsize=9, fontweight="600")
+    ax.annotate(f"Realisasi: {actual_now:.2f}%",
+                xy=(current_week, actual_now), xytext=(10, -20),
+                textcoords="offset points", color="#dc2626",
+                fontsize=9, fontweight="600")
+
+    ax.set_xlabel("Minggu ke-", fontsize=10)
+    ax.set_ylabel("Progress Kumulatif (%)", fontsize=10)
+    ax.set_title(f"S-Curve — {selected_vendor}", fontsize=12, fontweight="600")
+    ax.set_ylim(0, 105)
+    ax.set_xlim(1, max_week)
+    ax.set_xticks(weeks)
+    ax.tick_params(labelsize=9)
+    ax.legend(fontsize=9, loc="lower right")
+    ax.grid(alpha=0.25)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    st.pyplot(fig)
+    plt.close(fig)
+
+    # ---------------------------------------------------------
+    # KPI
+    # ---------------------------------------------------------
+    deviasi = actual_now - plan_now
+    spi = actual_now / plan_now if plan_now > 0 else 0
+
+    sc1, sc2, sc3, sc4 = st.columns(4)
+    sc1.metric(f"Rencana (M{current_week})", f"{plan_now:.2f}%")
+    sc2.metric(f"Realisasi (M{current_week})", f"{actual_now:.2f}%")
+    sc3.metric("Deviasi", f"{deviasi:+.2f}%")
+    sc4.metric("SPI", f"{spi:.3f}")
+
+    if deviasi < -5:
+        st.error(f"Deviasi {deviasi:.2f}% — berpotensi terlambat.")
+    elif deviasi < 0:
+        st.warning(f"Deviasi {deviasi:.2f}% — perlu perhatian.")
+    else:
+        st.success(f"Progress sesuai/lebih cepat {deviasi:+.2f}%.")
+
+    # ---------------------------------------------------------
+    # UNDUH CSV
+    # ---------------------------------------------------------
+    with st.expander("Unduh Data S-Curve"):
+        # bentuk dataframe dengan kolom M1..Mn
+        cols = ["No", "Uraian Pekerjaan", "Harga (juta Rp)", "Bobot (%)"] + [f"M{w}" for w in weeks]
+        rows_export = []
+        for i, row in wbs_edited.iterrows():
+            r = [row["No"], row["Item Pekerjaan"], row["Harga (juta Rp)"], row["Bobot (%)"]]
+            r += distrib_matrix[i]
+            rows_export.append(r)
+        # total
+        rows_export.append(["", "Total", total_harga, 100.00] + list(total_per_week))
+        rows_export.append(["", "Progress Rencana Kumulatif", "", ""] + list(cum_plan))
+        rows_export.append(["", "Total Realisasi per Minggu", "", ""] + list(total_actual_per_week))
+        rows_export.append(["", "Progress Realisasi Kumulatif", "", ""] + list(cum_actual))
+
+        df_export = pd.DataFrame(rows_export, columns=cols)
+        st.dataframe(df_export, use_container_width=True, hide_index=True)
+        st.download_button(
+            "Unduh S-Curve (CSV)",
+            data=df_export.to_csv(index=False).encode("utf-8-sig"),
+            file_name=f"s_curve_{meta['name'].replace(' ', '_')}.csv",
+            mime="text/csv",
+        )
+
+    st.markdown("---")
+
+    # ---------------------------------------------------------
+    # FORM SITE EXECUTION
+    # ---------------------------------------------------------
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("#### Pre Construction Meeting")
+        pcm_date = st.date_input("Tanggal PCM", datetime(2024, 10, 1), key="se_pcm_date")
+        pcm_notes = st.text_area("Catatan PCM", placeholder="Minimal 10 karakter...", height=100, key="se_pcm_notes")
+    with col2:
+        st.markdown("#### Analisa Kendala")
+        kendala = st.selectbox(
+            "Kendala utama",
+            ["Pilih kendala...", "Tidak ada", "Perubahan desain",
+             "Keterlambatan material", "Cuaca ekstrem", "Akses terbatas"],
+            key="se_kendala",
+        )
+        if kendala == "Tidak ada":
+            st.info("Tidak ada kendala.")
+            aksi = "Tidak diperlukan"
+            aksi_valid = True
+        elif kendala == "Pilih kendala...":
+            aksi = None
+            aksi_valid = False
+        else:
+            aksi = st.radio("Langkah penanganan", [
+                "Pilih aksi...", "Evaluasi dengan klien", "Revisi gambar kerja",
+                "Pengukuran ulang aktual", "Konsultasi GSB & GSJ",
+            ], key="se_aksi")
+            aksi_valid = aksi != "Pilih aksi..."
+        kpi = st.slider("KPI kontraktor (%)", 0, 100, 0, key="se_kpi")
+
+    pcm_valid = len(pcm_notes.strip()) >= 10
+    kendala_valid = kendala != "Pilih kendala..."
+    kpi_valid = kpi > 0
+    form_valid = pcm_valid and kendala_valid and aksi_valid and kpi_valid
+
+    if not form_valid:
+        missing = []
+        if not pcm_valid:
+            missing.append("catatan PCM min 10 karakter")
+        if not kendala_valid:
+            missing.append("kendala belum dipilih")
+        if not aksi_valid:
+            missing.append("aksi belum dipilih")
+        if not kpi_valid:
+            missing.append("KPI harus > 0%")
+        st.warning("Belum lengkap — " + "; ".join(missing))
+
+    if st.button("Simpan Data Site Execution", type="primary", key="btn_se"):
+        if not form_valid:
+            st.error("Data belum lengkap.")
+        else:
+            payload = {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "vendor": selected_vendor,
+                "current_week": current_week,
+                "plan_pct": float(plan_now),
+                "actual_pct": float(actual_now),
+                "deviation_pct": float(deviasi),
+                "spi": float(spi),
+                "pcm_date": str(pcm_date),
+                "pcm_notes": pcm_notes,
+                "kendala": kendala,
+                "aksi": aksi,
+                "kpi": kpi,
+                "wbs_count": len(wbs_edited),
+            }
+            live_data["site_execution"] = payload
+            st.success("Site Execution tersimpan. Lanjut ke Quality Control...")
+            next_step()
+            st.rerun()
 
     render_nav(show_next=stage_status(active, "site_execution"),
                next_label="Lanjut ke Quality Control")
@@ -1559,7 +1656,7 @@ elif step == 5:
                 st.markdown(f"- SPK: {format_rupiah(vs.get('selected_cost', 0))}")
                 st.markdown(f"- Penghematan: {format_rupiah(vs.get('saving', 0))}")
             if se:
-                st.markdown(f"- Realisasi: {se.get('actual_pct', 0):.1f}%")
+                st.markdown(f"- Realisasi: {se.get('actual_pct', 0):.2f}%")
                 st.markdown(f"- SPI: {se.get('spi', 0):.3f}")
             if qc:
                 st.markdown(f"- BAST: {qc.get('bast_number', '-')}")
