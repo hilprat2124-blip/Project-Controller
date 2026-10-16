@@ -95,6 +95,11 @@ st.markdown("""
     .step-chip:not(.active):not(.done) .num { background: #f3f4f6; color: #6b7280; }
     .step-chip.active .num { background: rgba(255,255,255,0.25); color: #ffffff; }
     .step-chip.done .num { background: #047857; color: #ffffff; }
+    .hint-box {
+        background: #eff6ff; border-left: 3px solid #1e40af;
+        padding: 8px 12px; border-radius: 4px; margin: 6px 0;
+        font-size: 0.85rem; color: #1e40af;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -280,6 +285,8 @@ with st.sidebar:
     new_budget = st.number_input(
         "Budget project (juta Rp)",
         min_value=10.0, value=300.0, step=10.0, key="new_budget",
+        help="Ini adalah budget yang di-approve. Nilai RAB awal akan default sama dengan budget ini, "
+             "tapi bisa diubah di tahap Tender."
     )
     new_deadline = st.number_input(
         "Deadline project (hari)",
@@ -509,9 +516,7 @@ for i, s in enumerate(STEPS):
     num = i
     if i == step:
         cls = "active"
-    elif i < step and i > 0:
-        cls = "done"
-    elif i > 0 and stage_status(active, s["key"]) if s["key"] != "done" else False:
+    elif i > 0 and i < step:
         cls = "done"
     else:
         cls = ""
@@ -575,13 +580,21 @@ if step == 1:
 
     with col2:
         st.markdown("#### RAB Awal")
-        st.caption("Nilai dalam juta Rupiah. Contoh: 300 berarti Rp 300.000.000.")
+        st.markdown(
+            f"<div class='hint-box'>"
+            f"Budget project di sidebar: <b>{format_rupiah(meta['budget'])}</b>. "
+            f"Nilai RAB di bawah otomatis terisi sama dengan budget sebagai titik awal — "
+            f"ubah manual kalau RAB dari tim KPOP berbeda."
+            f"</div>",
+            unsafe_allow_html=True,
+        )
         rab_awal_input = st.number_input(
             "Nilai RAB (juta Rp)",
             min_value=10.0,
             value=float(meta.get("rab_awal", meta.get("budget", 300.0))),
             step=10.0,
             key=f"rab_awal_{meta['id']}",
+            help="Nilai dalam juta Rupiah. Contoh: 900 berarti Rp 900.000.000."
         )
         budget_input = st.number_input(
             "Budget approved (juta Rp)",
@@ -589,6 +602,7 @@ if step == 1:
             value=float(meta.get("budget", 300.0)),
             step=10.0,
             key=f"budget_tender_{meta['id']}",
+            help="Nilai dalam juta Rupiah."
         )
         variance_preview = budget_input - rab_awal_input
         st.metric("Selisih terhadap RAB", format_rupiah(variance_preview))
@@ -1278,6 +1292,7 @@ elif step == 6:
             st.markdown(f"- Klien: {meta['client']}")
             st.markdown(f"- Lokasi: {meta['location']}")
             st.markdown(f"- Budget: {format_rupiah(meta['budget'])}")
+            st.markdown(f"- RAB Awal: {format_rupiah(meta.get('rab_awal', 0))}")
             st.markdown(f"- Deadline: {meta['deadline']} hari")
 
         with c2:
