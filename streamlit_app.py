@@ -96,23 +96,48 @@ def format_rupiah(juta):
     return f"Rp {juta:,.0f} juta"
 
 
+def _create_binary_vars(prob, var_name, index_list):
+    """
+    Buat variabel biner dengan kompatibilitas lintas versi PuLP.
+    Coba berbagai API sampai berhasil.
+    """
+    # Strategi 1: PuLP 4.x → prob.add_variable_dicts
+    try:
+        return prob.add_variable_dicts(
+            var_name, index_list, lowBound=0, upBound=1, cat="Binary"
+        )
+    except AttributeError:
+        pass
+
+    # Strategi 2: PuLP 2.x/3.x → LpVariable.dicts
+    try:
+        return pulp.LpVariable.dicts(
+            var_name, index_list, lowBound=0, upBound=1, cat="Binary"
+        )
+    except AttributeError:
+        pass
+
+    # Strategi 3: fallback — LpVariable manual (paling kompatibel)
+    x = {}
+    for i in index_list:
+        var = pulp.LpVariable(f"{var_name}_{i}")
+        var.lowBound = 0
+        var.upBound = 1
+        var.cat = pulp.LpInteger
+        x[i] = var
+    return x
+
+
 def solve_vendor_lp(vendor_names, costs, budget):
     """
     Optimasi pemilihan vendor dengan PuLP.
-    Menggunakan LpVariable.dicts() — kompatibel PuLP 2.x, 3.x, 4.x.
     Return: (selected_name_or_None, status_string)
     """
     try:
         prob = pulp.LpProblem("Vendor_Selection", pulp.LpMinimize)
 
-        # Variabel biner via dicts — API stabil lintas versi
-        x = pulp.LpVariable.dicts(
-            "select",
-            vendor_names,
-            lowBound=0,
-            upBound=1,
-            cat="Binary"
-        )
+        # Buat variabel biner — kompatibel semua versi PuLP
+        x = _create_binary_vars(prob, "select", vendor_names)
 
         # Objektif: minimasi total biaya
         prob += pulp.lpSum(costs[n] * x[n] for n in vendor_names)
@@ -123,7 +148,7 @@ def solve_vendor_lp(vendor_names, costs, budget):
         # Kendala 2: total biaya <= budget
         prob += pulp.lpSum(costs[n] * x[n] for n in vendor_names) <= budget
 
-        # Solve — biarkan PuLP pilih solver default
+        # Solve — biarkan PuLP pilih default solver
         prob.solve()
 
         status = pulp.LpStatus.get(prob.status, "Unknown")
