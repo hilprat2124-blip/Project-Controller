@@ -100,6 +100,12 @@ st.markdown("""
         padding: 8px 12px; border-radius: 4px; margin: 6px 0;
         font-size: 0.85rem; color: #1e40af;
     }
+    .flow-hint {
+        background: #f9fafb; border: 1px dashed #d1d5db;
+        padding: 10px 14px; border-radius: 6px;
+        font-size: 0.82rem; color: #4b5563;
+        margin-bottom: 12px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -166,11 +172,12 @@ if "step" not in st.session_state:
     st.session_state.step = 0
 
 
+# URUTAN BARU: Tender → Vendor Selection → Project Management → Site Execution → QC → Selesai
 STEPS = [
     {"key": "project_list", "label": "Daftar Project"},
     {"key": "tender", "label": "Tender"},
-    {"key": "project_mgmt", "label": "Project Management"},
     {"key": "vendor_selection", "label": "Vendor Selection"},
+    {"key": "project_mgmt", "label": "Project Management"},
     {"key": "site_execution", "label": "Site Execution"},
     {"key": "quality_control", "label": "Quality Control"},
     {"key": "done", "label": "Selesai"},
@@ -216,8 +223,8 @@ def get_active():
 def label(tahap):
     return {
         "tender": "Tender",
-        "project_mgmt": "Project Management",
         "vendor_selection": "Vendor Selection",
+        "project_mgmt": "Project Management",
         "site_execution": "Site Execution",
         "quality_control": "Quality Control",
     }.get(tahap, tahap)
@@ -228,7 +235,7 @@ def stage_status(project, tahap):
 
 
 def project_progress(project):
-    stages = ["tender", "project_mgmt", "vendor_selection",
+    stages = ["tender", "vendor_selection", "project_mgmt",
               "site_execution", "quality_control"]
     return sum(1 for t in stages if stage_status(project, t)), len(stages)
 
@@ -285,8 +292,7 @@ with st.sidebar:
     new_budget = st.number_input(
         "Budget project (juta Rp)",
         min_value=10.0, value=300.0, step=10.0, key="new_budget",
-        help="Ini adalah budget yang di-approve. Nilai RAB awal akan default sama dengan budget ini, "
-             "tapi bisa diubah di tahap Tender."
+        help="Budget yang di-approve. Nilai RAB awal default = budget, bisa diubah di tahap Tender."
     )
     new_deadline = st.number_input(
         "Deadline project (hari)",
@@ -326,7 +332,7 @@ with st.sidebar:
         st.caption(f"{done} dari {total} tahap selesai")
 
         st.markdown("---")
-        st.markdown("**Parameter Kriteria**")
+        st.markdown("**Parameter Kriteria Vendor**")
         min_quality = st.slider("Kualitas minimum", 0, 100, 82, key="min_quality")
         min_hse = st.slider("Skor K3 minimum", 0, 100, 85, key="min_hse")
         require_technical = st.checkbox("Wajib lolos teknis", value=True, key="req_tech")
@@ -551,6 +557,15 @@ def render_nav(show_next=True, next_label="Lanjut"):
 if step == 1:
     st.markdown("## Tahap 1 — Client & Tender")
 
+    st.markdown(
+        "<div class='flow-hint'>"
+        "Alur: Klien membuka tender → dokumen gambar/RKS/BoQ diserahkan → "
+        "Tim KPOP membuat RAB → Aanwijzing → Negosiasi → Kontrak. "
+        "Setelah tahap ini selesai, proses berlanjut ke <b>Vendor Selection</b>."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
     live = live_data.get("tender", {})
     if live:
         c1, c2, c3 = st.columns(3)
@@ -582,9 +597,9 @@ if step == 1:
         st.markdown("#### RAB Awal")
         st.markdown(
             f"<div class='hint-box'>"
-            f"Budget project : <b>{format_rupiah(meta['budget'])}</b>. "
-            f"Nilai RAB di bawah otomatis terisi sama dengan budget sebagai titik awal — "
-            f"ubah manual kalau RAB dari tim KPDP berbeda."
+            f"Budget project di sidebar: <b>{format_rupiah(meta['budget'])}</b>. "
+            f"Nilai RAB otomatis terisi sama dengan budget sebagai titik awal — "
+            f"ubah manual kalau RAB dari tim KPOP berbeda."
             f"</div>",
             unsafe_allow_html=True,
         )
@@ -594,7 +609,6 @@ if step == 1:
             value=float(meta.get("rab_awal", meta.get("budget", 300.0))),
             step=10.0,
             key=f"rab_awal_{meta['id']}",
-            help="Nilai dalam juta Rupiah. Contoh: 900 berarti Rp 900.000.000."
         )
         budget_input = st.number_input(
             "Budget approved (juta Rp)",
@@ -602,7 +616,6 @@ if step == 1:
             value=float(meta.get("budget", 300.0)),
             step=10.0,
             key=f"budget_tender_{meta['id']}",
-            help="Nilai dalam juta Rupiah."
         )
         variance_preview = budget_input - rab_awal_input
         st.metric("Selisih terhadap RAB", format_rupiah(variance_preview))
@@ -650,126 +663,29 @@ if step == 1:
                 "catatan": catatan,
             }
             live_data["tender"] = payload
-            st.success("Data Tender tersimpan. Melanjutkan ke tahap berikutnya...")
+            st.success("Data Tender tersimpan. Melanjutkan ke Vendor Selection...")
             next_step()
             st.rerun()
 
     render_nav(show_next=stage_status(active, "tender"),
-               next_label="Lanjut ke Project Management")
-
-
-# =========================================================
-# STEP 2 — PROJECT MANAGEMENT
-# =========================================================
-elif step == 2:
-    st.markdown("## Tahap 2 — Project Management")
-
-    live = live_data.get("project_mgmt", {})
-    if live:
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Approval Drawing", live.get("approval_status", "-"))
-        c2.metric("Cross Tender", live.get("cross_tender_status", "-"))
-        c3.metric("Progress", f"{live.get('progress_pct', 0)}%")
-        st.caption(f"Terakhir disimpan: {live.get('timestamp', '-')}")
-        st.markdown("---")
-
-    col1, col2 = st.columns([1, 1.4])
-
-    with col1:
-        st.markdown("#### Approval Drawing")
-        approval_status = st.radio(
-            "Status approval",
-            ["Belum diajukan", "Menunggu approval", "Disetujui", "Revisi"],
-            index=0,
-            key="pm_approval",
-        )
-        st.markdown("#### Dokumen Kontrol")
-        doc_wom = st.checkbox("WOM", value=False, key="pm_wom")
-        doc_boq = st.checkbox("BoQ", value=False, key="pm_boq")
-        doc_rab = st.checkbox("RAB", value=False, key="pm_rab")
-        doc_baseline = st.checkbox("Baseline Schedule", value=False, key="pm_baseline")
-        st.markdown("#### Cross Tender")
-        cross_tender_status = st.selectbox(
-            "Status cross tender",
-            ["Belum dimulai", "Sedang proses", "Selesai"], index=0,
-            key="pm_cross",
-        )
-        progress_pct = st.slider("Progress PM (%)", 0, 100, 0, key="pm_progress")
-
-    with col2:
-        st.markdown("#### Perbandingan Harga vs Baseline")
-        baseline_ref = float(meta.get("rab_awal", 300.0))
-        cross_data = pd.DataFrame({
-            "Vendor": ["Baja Nusantara", "Prima Pipa", "Karya Logam",
-                       "Sinergi Teknik", "Anugerah Pipa"],
-            "Penawaran": [285, 245, 310, 220, 340],
-            "Baseline": [baseline_ref] * 5,
-        })
-        fig, ax = plt.subplots(figsize=(8, 4))
-        x_pos = np.arange(len(cross_data))
-        ax.bar(x_pos, cross_data["Penawaran"], color="#1e40af", width=0.6, label="Penawaran")
-        ax.plot(x_pos, cross_data["Baseline"], color="#dc2626", linewidth=2,
-                linestyle="--", marker="o", markersize=6, label="Baseline RAB")
-        for i, (v, b) in enumerate(zip(cross_data["Penawaran"], cross_data["Baseline"])):
-            variance = (v - b) / b * 100 if b > 0 else 0
-            ax.text(i, v + 5, f"{variance:+.1f}%", ha="center", fontsize=9)
-        ax.set_xticks(x_pos)
-        ax.set_xticklabels(cross_data["Vendor"], rotation=15, ha="right", fontsize=9)
-        ax.set_ylabel("Harga (juta Rp)", fontsize=9)
-        ax.tick_params(labelsize=9)
-        ax.legend(fontsize=9)
-        ax.grid(axis="y", alpha=0.25)
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        st.pyplot(fig)
-        plt.close(fig)
-
-    dokumen_lengkap = all([doc_wom, doc_boq, doc_rab, doc_baseline])
-    approval_valid = approval_status != "Belum diajukan"
-    cross_valid = cross_tender_status != "Belum dimulai"
-    progress_valid = progress_pct > 0
-    form_valid = dokumen_lengkap and approval_valid and cross_valid and progress_valid
-
-    if not form_valid:
-        missing = []
-        if not approval_valid:
-            missing.append("approval drawing belum diisi")
-        if not dokumen_lengkap:
-            missing.append("semua dokumen wajib dicentang")
-        if not cross_valid:
-            missing.append("cross tender belum dimulai")
-        if not progress_valid:
-            missing.append("progress PM harus > 0%")
-        st.warning("Belum lengkap — " + "; ".join(missing))
-
-    if st.button("Simpan Data Project Management", type="primary", key="btn_save_pm"):
-        if not form_valid:
-            st.error("Data belum lengkap. Perbaiki dulu.")
-        else:
-            payload = {
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "approval_status": approval_status,
-                "dokumen": [d for d, v in [
-                    ("WOM", doc_wom), ("BoQ", doc_boq),
-                    ("RAB", doc_rab), ("Baseline", doc_baseline),
-                ] if v],
-                "cross_tender_status": cross_tender_status,
-                "progress_pct": progress_pct,
-            }
-            live_data["project_mgmt"] = payload
-            st.success("Data tersimpan. Melanjutkan ke tahap berikutnya...")
-            next_step()
-            st.rerun()
-
-    render_nav(show_next=stage_status(active, "project_mgmt"),
                next_label="Lanjut ke Vendor Selection")
 
 
 # =========================================================
-# STEP 3 — VENDOR SELECTION
+# STEP 2 — VENDOR SELECTION
 # =========================================================
-elif step == 3:
-    st.markdown("## Tahap 3 — Vendor Selection & Optimasi")
+elif step == 2:
+    st.markdown("## Tahap 2 — Vendor Selection & Optimasi")
+
+    st.markdown(
+        "<div class='flow-hint'>"
+        "Alur: Vendor mengajukan penawaran → Evaluasi teknis & harga → "
+        "Optimasi dengan Linear Programming → Approval drawing vendor → "
+        "Tanda tangan kontrak / SPK. Setelah kontrak ditandatangani, lanjut ke "
+        "<b>Project Management</b>."
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
     uploaded = st.file_uploader("Unggah data vendor (CSV, opsional)", type=["csv"])
 
@@ -961,11 +877,139 @@ elif step == 3:
                                 "kontrak_status": kontrak_status,
                             }
                             live_data["vendor_selection"] = payload
-                            st.success("Data tersimpan. Melanjutkan ke tahap berikutnya...")
+                            st.success("Vendor Selection tersimpan. Melanjutkan ke Project Management...")
                             next_step()
                             st.rerun()
 
     render_nav(show_next=stage_status(active, "vendor_selection"),
+               next_label="Lanjut ke Project Management")
+
+
+# =========================================================
+# STEP 3 — PROJECT MANAGEMENT
+# =========================================================
+elif step == 3:
+    st.markdown("## Tahap 3 — Project Management")
+
+    st.markdown(
+        "<div class='flow-hint'>"
+        "Alur: Setelah kontrak ditandatangani, tim PM menyiapkan dokumen kontrol — "
+        "WOM, BoQ, RAB final, dan baseline schedule — sebagai acuan eksekusi di lapangan. "
+        "Setelah baseline selesai, proyek lanjut ke <b>Site Execution</b>."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    live = live_data.get("project_mgmt", {})
+    if live:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Approval Drawing", live.get("approval_status", "-"))
+        c2.metric("Cross Tender", live.get("cross_tender_status", "-"))
+        c3.metric("Progress", f"{live.get('progress_pct', 0)}%")
+        st.caption(f"Terakhir disimpan: {live.get('timestamp', '-')}")
+        st.markdown("---")
+
+    vs_data = live_data.get("vendor_selection", {})
+    if vs_data:
+        st.markdown(
+            f"<div class='hint-box'>"
+            f"<b>Vendor terpilih dari tahap sebelumnya:</b> "
+            f"{vs_data.get('selected_vendor', '-')} · "
+            f"Nilai kontrak: {format_rupiah(vs_data.get('selected_cost', 0))} · "
+            f"Durasi: {vs_data.get('selected_duration', 0)} hari"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    col1, col2 = st.columns([1, 1.4])
+
+    with col1:
+        st.markdown("#### Approval Drawing")
+        approval_status = st.radio(
+            "Status approval",
+            ["Belum diajukan", "Menunggu approval", "Disetujui", "Revisi"],
+            index=0,
+            key="pm_approval",
+        )
+        st.markdown("#### Dokumen Kontrol")
+        doc_wom = st.checkbox("WOM", value=False, key="pm_wom")
+        doc_boq = st.checkbox("BoQ", value=False, key="pm_boq")
+        doc_rab = st.checkbox("RAB", value=False, key="pm_rab")
+        doc_baseline = st.checkbox("Baseline Schedule", value=False, key="pm_baseline")
+        st.markdown("#### Cross Tender")
+        cross_tender_status = st.selectbox(
+            "Status cross tender",
+            ["Belum dimulai", "Sedang proses", "Selesai"], index=0,
+            key="pm_cross",
+        )
+        progress_pct = st.slider("Progress PM (%)", 0, 100, 0, key="pm_progress")
+
+    with col2:
+        st.markdown("#### Perbandingan Harga vs Baseline")
+        baseline_ref = float(meta.get("rab_awal", 300.0))
+        cross_data = pd.DataFrame({
+            "Vendor": ["Baja Nusantara", "Prima Pipa", "Karya Logam",
+                       "Sinergi Teknik", "Anugerah Pipa"],
+            "Penawaran": [285, 245, 310, 220, 340],
+            "Baseline": [baseline_ref] * 5,
+        })
+        fig, ax = plt.subplots(figsize=(8, 4))
+        x_pos = np.arange(len(cross_data))
+        ax.bar(x_pos, cross_data["Penawaran"], color="#1e40af", width=0.6, label="Penawaran")
+        ax.plot(x_pos, cross_data["Baseline"], color="#dc2626", linewidth=2,
+                linestyle="--", marker="o", markersize=6, label="Baseline RAB")
+        for i, (v, b) in enumerate(zip(cross_data["Penawaran"], cross_data["Baseline"])):
+            variance = (v - b) / b * 100 if b > 0 else 0
+            ax.text(i, v + 5, f"{variance:+.1f}%", ha="center", fontsize=9)
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels(cross_data["Vendor"], rotation=15, ha="right", fontsize=9)
+        ax.set_ylabel("Harga (juta Rp)", fontsize=9)
+        ax.tick_params(labelsize=9)
+        ax.legend(fontsize=9)
+        ax.grid(axis="y", alpha=0.25)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        st.pyplot(fig)
+        plt.close(fig)
+
+    dokumen_lengkap = all([doc_wom, doc_boq, doc_rab, doc_baseline])
+    approval_valid = approval_status != "Belum diajukan"
+    cross_valid = cross_tender_status != "Belum dimulai"
+    progress_valid = progress_pct > 0
+    form_valid = dokumen_lengkap and approval_valid and cross_valid and progress_valid
+
+    if not form_valid:
+        missing = []
+        if not approval_valid:
+            missing.append("approval drawing belum diisi")
+        if not dokumen_lengkap:
+            missing.append("semua dokumen wajib dicentang")
+        if not cross_valid:
+            missing.append("cross tender belum dimulai")
+        if not progress_valid:
+            missing.append("progress PM harus > 0%")
+        st.warning("Belum lengkap — " + "; ".join(missing))
+
+    if st.button("Simpan Data Project Management", type="primary", key="btn_save_pm"):
+        if not form_valid:
+            st.error("Data belum lengkap. Perbaiki dulu.")
+        else:
+            payload = {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "approval_status": approval_status,
+                "dokumen": [d for d, v in [
+                    ("WOM", doc_wom), ("BoQ", doc_boq),
+                    ("RAB", doc_rab), ("Baseline", doc_baseline),
+                ] if v],
+                "cross_tender_status": cross_tender_status,
+                "progress_pct": progress_pct,
+            }
+            live_data["project_mgmt"] = payload
+            st.success("Data Project Management tersimpan. Melanjutkan ke Site Execution...")
+            next_step()
+            st.rerun()
+
+    render_nav(show_next=stage_status(active, "project_mgmt"),
                next_label="Lanjut ke Site Execution")
 
 
@@ -974,6 +1018,15 @@ elif step == 3:
 # =========================================================
 elif step == 4:
     st.markdown("## Tahap 4 — Site Execution")
+
+    st.markdown(
+        "<div class='flow-hint'>"
+        "Alur: PCM → Mobilisasi material & alat → Pekerjaan konstruksi → "
+        "Monitoring progress via S-Curve → Analisa kendala lapangan → Evaluasi KPI kontraktor. "
+        "Setelah pekerjaan selesai, lanjut ke <b>Quality Control</b>."
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
     vs = live_data.get("vendor_selection", {})
     selected_vendor = vs.get("selected_vendor", "-")
@@ -1162,7 +1215,7 @@ elif step == 4:
                         "total_bobot": float(total_bobot),
                     }
                     live_data["site_execution"] = payload
-                    st.success("Data tersimpan. Melanjutkan ke tahap berikutnya...")
+                    st.success("Data Site Execution tersimpan. Melanjutkan ke Quality Control...")
                     next_step()
                     st.rerun()
 
@@ -1175,6 +1228,14 @@ elif step == 4:
 # =========================================================
 elif step == 5:
     st.markdown("## Tahap 5 — Quality Control & Handover")
+
+    st.markdown(
+        "<div class='flow-hint'>"
+        "Alur: Pemberitahuan pekerjaan selesai → Inspeksi mutu & test commissioning → "
+        "Inspeksi akhir → Berita Acara Serah Terima (BAST) → Proyek selesai."
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
     live = live_data.get("quality_control", {})
     if live:
@@ -1274,6 +1335,7 @@ elif step == 6:
 
     tender = live_data.get("tender", {})
     vs = live_data.get("vendor_selection", {})
+    pm = live_data.get("project_mgmt", {})
     se = live_data.get("site_execution", {})
     qc = live_data.get("quality_control", {})
 
@@ -1300,6 +1362,8 @@ elif step == 6:
             if vs:
                 st.markdown(f"- Vendor terpilih: {vs.get('selected_vendor', '-')}")
                 st.markdown(f"- Nilai kontrak: {format_rupiah(vs.get('selected_cost', 0))}")
+            if pm:
+                st.markdown(f"- Progress PM: {pm.get('progress_pct', 0)}%")
             if se:
                 st.markdown(f"- Realisasi progress: {se.get('actual_pct', 0):.1f}%")
                 st.markdown(f"- SPI: {se.get('spi', 0):.3f}")
@@ -1313,8 +1377,8 @@ elif step == 6:
         with c1:
             all_data = {
                 "tender": tender,
-                "project_mgmt": live_data.get("project_mgmt", {}),
                 "vendor_selection": vs,
+                "project_mgmt": pm,
                 "site_execution": se,
                 "quality_control": qc,
             }
