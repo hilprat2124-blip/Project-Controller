@@ -96,58 +96,46 @@ def format_rupiah(juta):
     return f"Rp {juta:,.0f} juta"
 
 
-def safe_float(v, default=0.0):
-    try:
-        return float(v)
-    except (TypeError, ValueError):
-        return default
-
-
 def solve_vendor_lp(vendor_names, costs, budget):
     """
-    Selesaikan optimasi pemilihan vendor.
-    Return: (selected_name, status)
-    selected_name = nama vendor terpilih atau None
-    status = string status solver
+    Optimasi pemilihan vendor dengan PuLP.
+    Return: (selected_name_or_None, status_string)
     """
-    model = pulp.LpProblem("Vendor_Selection", pulp.LpMinimize)
-
-    # Variabel biner via matrix — kompatibel PuLP 2.x, 3.x, 4.x
-    x_vars = pulp.LpVariable.matrix(
-        "select",
-        indices=[list(range(len(vendor_names)))],
-        cat=pulp.LpBinary
-    )[0]
-
-    x_dict = {name: x_vars[i] for i, name in enumerate(vendor_names)}
-
-    # Objektif: minimasi biaya
-    model += pulp.lpSum(costs[n] * x_dict[n] for n in vendor_names)
-
-    # Kendala: tepat 1 vendor
-    model += pulp.lpSum(x_dict[n] for n in vendor_names) == 1
-
-    # Kendala: total <= budget
-    model += pulp.lpSum(costs[n] * x_dict[n] for n in vendor_names) <= budget
-
     try:
-        model.solve(pulp.PULP_CBC_CMD(msg=False))
+        prob = pulp.LpProblem("Vendor_Selection", pulp.LpMinimize)
+
+        # Buat variabel biner — pakai loop sederhana, argumen posisional
+        x = {}
+        for i, name in enumerate(vendor_names):
+            x[name] = pulp.LpVariable(f"select_{i}", 0, 1, pulp.LpInteger)
+
+        # Objektif: minimasi total biaya
+        prob += pulp.lpSum(costs[n] * x[n] for n in vendor_names)
+
+        # Kendala 1: tepat 1 vendor
+        prob += pulp.lpSum(x[n] for n in vendor_names) == 1
+
+        # Kendala 2: total <= budget
+        prob += pulp.lpSum(costs[n] * x[n] for n in vendor_names) <= budget
+
+        # Solve — biarkan PuLP pilih default solver
+        prob.solve()
+
+        status = pulp.LpStatus.get(prob.status, "Unknown")
+
+        if status != "Optimal":
+            return None, status
+
+        # Cari vendor terpilih
+        for n in vendor_names:
+            val = pulp.value(x[n])
+            if val is not None and val > 0.5:
+                return n, status
+
+        return None, "No vendor selected"
+
     except Exception as e:
-        return None, f"Solver error: {e}"
-
-    status = pulp.LpStatus.get(model.status, "Unknown")
-
-    if status != "Optimal":
-        return None, status
-
-    selected = None
-    for n in vendor_names:
-        val = pulp.value(x_dict[n])
-        if val is not None and val > 0.5:
-            selected = n
-            break
-
-    return selected, status
+        return None, f"Error: {e}"
 
 
 # =========================================================
@@ -375,7 +363,7 @@ with col_status:
 st.markdown("---")
 
 # =========================================================
-# VENDOR DATA
+# VENDOR DATA DEFAULT
 # =========================================================
 DEFAULT_VENDORS = pd.DataFrame([
     {"Vendor": "PT Baja Nusantara Konstruksi", "Harga (juta Rp)": 285.0, "Kualitas (0-100)": 91,
@@ -805,20 +793,18 @@ with tab3:
                         st.markdown(f"- {s}")
 
                 else:
-                    # =====================================================
-                    # OPTIMASI PULP — pakai helper yang kompatibel semua versi
-                    # =====================================================
+                    # Jalankan optimasi
                     vendor_names = eligible["Vendor"].tolist()
                     costs = eligible.set_index("Vendor")["Harga (juta Rp)"].to_dict()
 
-                    selected_vendor_name, solver_status = solve_vendor_lp(
+                    selected_name, solver_status = solve_vendor_lp(
                         vendor_names, costs, budget
                     )
 
-                    if selected_vendor_name is None:
+                    if selected_name is None:
                         st.error(f"Optimasi gagal. Status: {solver_status}")
                     else:
-                        best = eligible[eligible["Vendor"] == selected_vendor_name].iloc[0]
+                        best = eligible[eligible["Vendor"] == selected_name].iloc[0]
                         selected_cost = float(best["Harga (juta Rp)"])
 
                         st.markdown("---")
@@ -833,7 +819,7 @@ with tab3:
                         r4.metric("Sisa budget", format_rupiah(budget - selected_cost))
 
                         chart_data = eligible.sort_values("Harga (juta Rp)")
-                        colors = ["#047857" if v == selected_vendor_name else "#1e40af"
+                        colors = ["#047857" if v == selected_name else "#1e40af"
                                   for v in chart_data["Vendor"]]
 
                         fig, ax = plt.subplots(figsize=(10, 3.5))
