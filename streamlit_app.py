@@ -1,5 +1,11 @@
 import io
 import streamlit as st
+
+try:
+    import openpyxl  # noqa: F401
+    HAS_OPENPYXL = True
+except ImportError:
+    HAS_OPENPYXL = False
 import pandas as pd
 import pulp
 import matplotlib
@@ -256,13 +262,76 @@ def _norm_complexity(v):
     return "Sedang"
 
 
-def parse_boq_excel(file):
-    """Baca file Excel/CSV BOQ -> list of dict. Raise ValueError jika format salah."""
+def _read_upload(file):
+    """Baca file upload (Excel/CSV) -> DataFrame (semua kolom string)."""
     name = getattr(file, "name", "").lower()
     if name.endswith(".csv"):
-        df = pd.read_csv(file, dtype=str)
-    else:
-        df = pd.read_excel(file, dtype=str)
+        try:
+            return pd.read_csv(file, dtype=str)
+        except UnicodeDecodeError:
+            file.seek(0)
+            return pd.read_csv(file, dtype=str, encoding="latin-1")
+    if not HAS_OPENPYXL and name.endswith(".xlsx"):
+        raise ValueError(
+            "Library 'openpyxl' belum terpasang di server. "
+            "Tambahkan 'openpyxl' ke requirements.txt, atau upload file CSV."
+        )
+    try:
+        return pd.read_excel(file, dtype=str)
+    except ImportError:
+        raise ValueError(
+            "Library pembaca Excel belum terpasang (openpyxl untuk .xlsx, xlrd untuk .xls). "
+            "Simpan file sebagai .xlsx atau CSV."
+        )
+
+
+VENDOR_ALIASES = ["vendor", "nama vendor", "nama perusahaan", "perusahaan",
+                  "kontraktor", "supplier", "company", "nama"]
+
+
+def parse_vendor_excel(file):
+    """Baca daftar vendor dari Excel/CSV -> list nama unik. Raise ValueError jika kosong."""
+    df = _read_upload(file)
+    col = None
+    for c in df.columns:
+        if str(c).strip().lower() in VENDOR_ALIASES:
+            col = c
+            break
+    if col is None:
+        col = df.columns[0] if len(df.columns) else None  # fallback: kolom pertama
+    if col is None:
+        raise ValueError("File kosong.")
+    names = []
+    for v in df[col].dropna().astype(str):
+        v = v.strip()
+        if v and v.lower() != "nan" and v not in names:
+            names.append(v)
+    if not names:
+        raise ValueError("Tidak ada nama vendor yang valid di file.")
+    return names
+
+
+def vendor_template_bytes():
+    """Return (data, filename, mime) template daftar vendor."""
+    df = pd.DataFrame({"Vendor": INVITED_VENDORS})
+    if HAS_OPENPYXL:
+        try:
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                df.to_excel(writer, index=False, sheet_name="Vendor")
+            return (
+                buf.getvalue(),
+                "template_vendor.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        except Exception:
+            pass
+    return df.to_csv(index=False).encode("utf-8-sig"), "template_vendor.csv", "text/csv"
+
+
+def parse_boq_excel(file):
+    """Baca file Excel/CSV BOQ -> list of dict. Raise ValueError jika format salah."""
+    df = _read_upload(file)
 
     # samakan nama kolom (case-insensitive + alias)
     rename = {}
@@ -297,10 +366,24 @@ def parse_boq_excel(file):
 
 
 def boq_template_bytes():
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        default_items().to_excel(writer, index=False, sheet_name="BOQ")
-    return buf.getvalue()
+    """Return (data, filename, mime). Fallback ke CSV jika openpyxl tidak ada."""
+    if HAS_OPENPYXL:
+        try:
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                default_items().to_excel(writer, index=False, sheet_name="BOQ")
+            return (
+                buf.getvalue(),
+                "template_boq.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        except Exception:
+            pass
+    return (
+        default_items().to_csv(index=False).encode("utf-8-sig"),
+        "template_boq.csv",
+        "text/csv",
+    )
 
 
 # =========================================================
@@ -760,19 +843,26 @@ if step == 1:
 
         # ---------- IMPORT EXCEL ----------
         with st.expander("📥 Import BOQ dari Excel", expanded=False):
+            if not HAS_OPENPYXL:
+                st.warning(
+                    "Library 'openpyxl' belum terpasang, jadi import Excel (.xlsx) dinonaktifkan. "
+                    "Gunakan CSV, atau tambahkan 'openpyxl' ke requirements.txt lalu redeploy."
+                )
             c_up, c_tpl = st.columns([3, 1])
             with c_tpl:
+                tpl_data, tpl_name, tpl_mime = boq_template_bytes()
                 st.download_button(
                     "Unduh Template",
-                    data=boq_template_bytes(),
-                    file_name="template_boq.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    data=tpl_data,
+                    file_name=tpl_name,
+                    mime=tpl_mime,
                     key=f"tpl_boq_{pid}",
                 )
             with c_up:
+                up_types = ["xlsx", "xls", "csv"] if HAS_OPENPYXL else ["csv"]
                 up_file = st.file_uploader(
-                    "Upload file (.xlsx / .xls / .csv)",
-                    type=["xlsx", "xls", "csv"],
+                    "Upload file (" + " / ".join("." + t for t in up_types) + ")",
+                    type=up_types,
                     key=f"boq_upload_{pid}_{active['items_ver']}",
                 )
 
@@ -910,10 +1000,62 @@ elif step == 2:
         if "invited_vendors" not in active or not active["invited_vendors"]:
             active["invited_vendors"] = INVITED_VENDORS.copy()
 
+        if "invited_ver" not in active:
+            active["invited_ver"] = 0
+
+        # ---------- IMPORT EXCEL VENDOR ----------
+        with st.expander("📥 Import Vendor dari Excel", expanded=False):
+            if not HAS_OPENPYXL:
+                st.warning(
+                    "Library 'openpyxl' belum terpasang, jadi import Excel (.xlsx) dinonaktifkan. "
+                    "Gunakan CSV, atau tambahkan 'openpyxl' ke requirements.txt lalu redeploy."
+                )
+            cv_up, cv_tpl = st.columns([3, 1])
+            with cv_tpl:
+                vt_data, vt_name, vt_mime = vendor_template_bytes()
+                st.download_button(
+                    "Unduh Template",
+                    data=vt_data, file_name=vt_name, mime=vt_mime,
+                    key=f"tpl_vendor_{pid}",
+                )
+            with cv_up:
+                v_types = ["xlsx", "xls", "csv"] if HAS_OPENPYXL else ["csv"]
+                v_file = st.file_uploader(
+                    "Upload file (" + " / ".join("." + t for t in v_types) + ")",
+                    type=v_types,
+                    key=f"vendor_upload_{pid}_{active['invited_ver']}",
+                )
+
+            if v_file is not None:
+                try:
+                    v_parsed = parse_vendor_excel(v_file)
+                    st.success(f"Terbaca {len(v_parsed)} vendor. Preview:")
+                    st.dataframe(pd.DataFrame({"Vendor": v_parsed}),
+                                 use_container_width=True, hide_index=True)
+                    v_mode = st.radio(
+                        "Mode impor",
+                        ["Ganti semua vendor", "Tambahkan ke daftar yang ada"],
+                        horizontal=True, key=f"vendor_mode_{pid}",
+                    )
+                    if st.button("Terapkan ke Daftar Vendor", type="primary",
+                                 key=f"vendor_apply_{pid}"):
+                        if v_mode == "Ganti semua vendor":
+                            new_list = v_parsed
+                        else:
+                            new_list = list(active["invited_vendors"])
+                            for nm in v_parsed:
+                                if nm not in new_list:
+                                    new_list.append(nm)
+                        active["invited_vendors"] = new_list
+                        active["invited_ver"] += 1  # reset editor & uploader
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Gagal membaca file: {e}")
+
         invited_df = pd.DataFrame({"Vendor": active["invited_vendors"]})
         invited_edited = st.data_editor(
             invited_df, use_container_width=True, hide_index=True,
-            num_rows="dynamic", key=f"invited_{pid}",
+            num_rows="dynamic", key=f"invited_{pid}_{active['invited_ver']}",
             column_config={"Vendor": st.column_config.TextColumn("Vendor", required=True)},
         )
         active["invited_vendors"] = invited_edited["Vendor"].dropna().tolist()
