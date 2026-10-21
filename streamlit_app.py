@@ -594,16 +594,6 @@ with st.sidebar:
         done, total = project_progress(active)
         st.caption(f"{done} dari {total} tahap selesai")
 
-        st.markdown("---")
-        st.markdown("**Parameter Kriteria Vendor**")
-        min_quality = st.slider("Kualitas minimum", 0, 100, 82, key="min_quality")
-        min_hse = st.slider("Skor K3 minimum", 0, 100, 85, key="min_hse")
-        min_performance = st.slider("Skor performa minimum", 0, 100, 70, key="min_perf")
-        budget_weight = st.slider(
-            "Bobot harga vs performa (%)", 0, 100, 50, key="weight_price",
-        )
-        weight_price = budget_weight / 100
-        weight_perf = 1 - weight_price
 
         st.markdown("---")
         st.markdown("**Budget & Deadline Project**")
@@ -633,8 +623,7 @@ with st.sidebar:
             st.session_state.step = 0
             st.rerun()
     else:
-        min_quality, min_hse, min_performance = 82, 85, 70
-        weight_price, weight_perf = 0.5, 0.5
+        pass
 
 # =========================================================
 # HEADER
@@ -788,7 +777,7 @@ if step == 1:
     st.markdown("## Tahap 1 — Tender & BOQ")
     st.markdown(
         "<div class='flow-hint'>"
-        "Alur: Klien membuka tender → kita siapkan BOQ → vendor diundang untuk isi RAB & performa."
+        "Alur: Klien membuka tender → kita siapkan BOQ → vendor diundang untuk isi penawaran harga & durasi."
         "</div>",
         unsafe_allow_html=True,
     )
@@ -973,7 +962,7 @@ elif step == 2:
     st.markdown("## Tahap 2 — Vendor Qualification & Selection")
     st.markdown(
         "<div class='flow-hint'>"
-        "Alur: Vendor diundang → mereka isi RAB + kemampuan + performa → "
+        "Alur: Vendor diundang → mereka isi penawaran harga & durasi → "
         "klarifikasi teknis → optimasi → deal harga & SPK."
         "</div>",
         unsafe_allow_html=True,
@@ -981,7 +970,7 @@ elif step == 2:
 
     sub1, sub2, sub3, sub4, sub5 = st.tabs([
         "1. BOQ & Vendor Diundang",
-        "2. Input RAB + Kemampuan + Performa",
+        "2. Input Penawaran Harga & Durasi",
         "3. Appointment Klarifikasi Teknis",
         "4. Optimasi Setelah Klarifikasi",
         "5. Deal Harga & SPK",
@@ -1073,19 +1062,17 @@ elif step == 2:
                 if v not in active["vendor_data"]:
                     active["vendor_data"][v] = {
                         "harga_rab": 0.0, "durasi": 0,
-                        "kemampuan": {},
-                        "performa": {aspek: 75 for aspek in PERFORMANCE_ASPECTS},
                         "catatan_vendor": "",
                     }
 
             vendor_pick = st.selectbox("Pilih vendor", options=invited, key=f"vp_{pid}")
             v_data = active["vendor_data"][vendor_pick]
 
-            st.markdown(f"#### A. RAB & Durasi — {vendor_pick}")
+            st.markdown(f"#### A. Penawaran Harga & Durasi — {vendor_pick}")
             c1, c2 = st.columns(2)
             with c1:
                 v_data["harga_rab"] = st.number_input(
-                    "Harga RAB (juta Rp)", min_value=0.0,
+                    "Penawaran Harga (juta Rp)", min_value=0.0,
                     value=float(v_data["harga_rab"]), step=5.0,
                     key=f"rab_{vendor_pick}",
                 )
@@ -1096,50 +1083,9 @@ elif step == 2:
                     step=1, key=f"dur_{vendor_pick}",
                 )
 
-            st.markdown(f"#### B. Kemampuan Teknis per Item — {vendor_pick}")
-            items_data = active.get("items_data", [])
-            for item in items_data:
-                item_no = str(item["No"])
-                if item_no not in v_data["kemampuan"]:
-                    v_data["kemampuan"][item_no] = {"status": "Sanggup", "catatan": ""}
-
-                c1, c2, c3 = st.columns([2, 1, 2])
-                with c1:
-                    st.markdown(f"**{item['No']}. {item['Item Pekerjaan']}**")
-                    st.caption(f"{item['Spesifikasi']} · {item['Volume']} {item['Satuan']}")
-                with c2:
-                    status_val = st.selectbox(
-                        f"Status {item_no}",
-                        ["Sanggup", "Sanggup dengan Catatan", "Tidak Sanggup"],
-                        index=["Sanggup", "Sanggup dengan Catatan", "Tidak Sanggup"].index(
-                            v_data["kemampuan"][item_no]["status"]
-                        ),
-                        key=f"st_{vendor_pick}_{item_no}",
-                        label_visibility="collapsed",
-                    )
-                with c3:
-                    catatan_val = st.text_input(
-                        f"Catatan {item_no}",
-                        value=v_data["kemampuan"][item_no]["catatan"],
-                        key=f"ct_{vendor_pick}_{item_no}",
-                        placeholder="Catatan",
-                        label_visibility="collapsed",
-                    )
-                v_data["kemampuan"][item_no] = {"status": status_val, "catatan": catatan_val}
-
-            st.markdown(f"#### C. Penilaian Performa — {vendor_pick}")
-            c1, c2 = st.columns(2)
-            for i, aspek in enumerate(PERFORMANCE_ASPECTS):
-                target = c1 if i % 2 == 0 else c2
-                with target:
-                    v_data["performa"][aspek] = st.slider(
-                        aspek, 0, 100, v_data["performa"][aspek],
-                        key=f"pf_{vendor_pick}_{aspek}"
-                    )
-
-            st.markdown(f"#### D. Catatan — {vendor_pick}")
+            st.markdown(f"#### B. Catatan — {vendor_pick}")
             v_data["catatan_vendor"] = st.text_area(
-                "Catatan", value=v_data["catatan_vendor"], height=100,
+                "Catatan", value=v_data.get("catatan_vendor", ""), height=100,
                 key=f"nt_{vendor_pick}",
             )
 
@@ -1150,15 +1096,10 @@ elif step == 2:
             rows = []
             for v in invited:
                 vd = active["vendor_data"][v]
-                avg_perf = sum(vd["performa"].values()) / len(vd["performa"]) if vd["performa"] else 0
-                sanggup = sum(1 for k, val in vd["kemampuan"].items() if val["status"] == "Sanggup")
-                total = len(vd["kemampuan"]) if vd["kemampuan"] else 1
                 rows.append({
                     "Vendor": v,
-                    "RAB (jt)": vd["harga_rab"],
-                    "Durasi": vd["durasi"],
-                    "Kemampuan": f"{sanggup}/{total}",
-                    "Skor Performa": round(avg_perf, 1),
+                    "Penawaran (jt)": vd["harga_rab"],
+                    "Durasi (hari)": vd["durasi"],
                 })
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
@@ -1252,22 +1193,18 @@ elif step == 2:
         if not invited:
             prasyarat.append("vendor diundang")
         if not vendor_data or all(v["harga_rab"] == 0 for v in vendor_data.values()):
-            prasyarat.append("RAB vendor")
+            prasyarat.append("penawaran harga vendor")
         if not active["appointments"]:
             prasyarat.append("appointment klarifikasi")
 
         if prasyarat:
             st.warning("Belum bisa optimasi. Selesaikan: " + ", ".join(prasyarat))
         else:
-            st.caption("Optimasi pakai **normalisasi min-max** + skor performa.")
+            st.caption("Optimasi memilih vendor dengan **penawaran harga terendah** yang masih dalam budget.")
 
-            scores = {}
             harga = {}
             for v in invited:
                 vd = vendor_data.get(v, {})
-                perf_values = list(vd.get("performa", {}).values())
-                avg_perf = sum(perf_values) / len(perf_values) if perf_values else 0
-                scores[v] = avg_perf
                 harga[v] = vd.get("harga_rab", 0)
 
             st.markdown("#### Data untuk Optimasi")
@@ -1275,46 +1212,43 @@ elif step == 2:
             for v in invited:
                 rows.append({
                     "Vendor": v,
-                    "RAB (juta Rp)": format_rupiah(harga[v]),
-                    "Skor Performa": round(scores[v], 1),
+                    "Penawaran (juta Rp)": format_rupiah(harga[v]),
+                    "Durasi (hari)": vendor_data.get(v, {}).get("durasi", 0),
                 })
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
             eligible = [
                 v for v in invited
-                if harga[v] > 0 and harga[v] <= budget and scores[v] >= min_performance
+                if harga[v] > 0 and harga[v] <= budget
             ]
 
             if not eligible:
                 st.error("Tidak ada vendor yang lolos kriteria.")
             else:
-                cc1, cc2, cc3, cc4 = st.columns(4)
+                cc1, cc2 = st.columns(2)
                 cc1.metric("Budget", format_rupiah(budget))
-                cc2.metric("Min performa", f"{min_performance}")
-                cc3.metric("Bobot harga", f"{int(weight_price*100)}%")
-                cc4.metric("Bobot performa", f"{int(weight_perf*100)}%")
+                cc2.metric("Vendor lolos budget", f"{len(eligible)} dari {len(invited)}")
 
                 st.markdown("---")
                 selected_name, solver_status = solve_vendor_lp(
-                    eligible, harga, budget, scores, weight_price, weight_perf
+                    eligible, harga, budget, None, 1.0, 0.0
                 )
 
                 if selected_name is None:
                     st.error(f"Optimasi gagal: {solver_status}")
                 else:
                     selected_cost = harga[selected_name]
-                    selected_score = scores[selected_name]
+                    selected_duration = vendor_data.get(selected_name, {}).get("durasi", 0)
 
                     st.success(f"**Vendor terbaik: {selected_name}**")
                     r1, r2, r3, r4 = st.columns(4)
                     r1.metric("Vendor", selected_name)
-                    r2.metric("Harga RAB", format_rupiah(selected_cost))
-                    r3.metric("Skor Performa", f"{selected_score:.1f}")
+                    r2.metric("Harga Penawaran", format_rupiah(selected_cost))
+                    r3.metric("Durasi", f"{selected_duration} hari")
                     r4.metric("Sisa budget", format_rupiah(budget - selected_cost))
 
                     st.session_state[f"optimized_vendor_{pid}"] = selected_name
                     st.session_state[f"optimized_cost_{pid}"] = selected_cost
-                    st.session_state[f"optimized_score_{pid}"] = selected_score
 
     with sub5:
         st.markdown("### Deal Harga & SPK")
@@ -1327,7 +1261,7 @@ elif step == 2:
             st.markdown(
                 f"<div class='hint-box'>"
                 f"<b>Vendor:</b> {optimized_vendor}<br>"
-                f"<b>Harga RAB awal:</b> {format_rupiah(optimized_cost)}"
+                f"<b>Harga penawaran awal:</b> {format_rupiah(optimized_cost)}"
                 f"</div>",
                 unsafe_allow_html=True,
             )
@@ -1389,7 +1323,6 @@ elif step == 2:
                         "selected_cost": float(final_price),
                         "saving": float(saving),
                         "selected_duration": int(vd.get("durasi", 0)),
-                        "selected_performance": float(st.session_state.get(f"optimized_score_{pid}", 0)),
                         "spk_number": spk_number,
                         "spk_date": str(spk_date),
                         "spk_signer": spk_signer,
