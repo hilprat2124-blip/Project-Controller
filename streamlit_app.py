@@ -187,8 +187,30 @@ def _create_binary_vars(prob, var_name, index_list):
     return x
 
 
+def _solve_direct(vendor_names, costs, budget, scores, weight_price, weight_perf):
+    """Pemilihan langsung (tanpa solver) dengan fungsi tujuan yang sama dengan LP.
+    Dipakai sebagai cadangan jika solver PuLP tidak tersedia di server."""
+    cand = [n for n in vendor_names if costs[n] <= budget]
+    if not cand:
+        return None, "Infeasible"
+    if scores is None:
+        scores = {n: 100 for n in vendor_names}
+    min_cost = min(costs[n] for n in vendor_names)
+    max_cost = max(costs[n] for n in vendor_names)
+    cost_range = max_cost - min_cost if max_cost > min_cost else 1
+
+    def objective(n):
+        cost_score = 100 * (max_cost - costs[n]) / cost_range
+        return weight_price * cost_score / 100 + weight_perf * scores[n] / 100
+
+    best = max(cand, key=lambda n: (objective(n), -costs[n]))
+    return best, "Optimal (direct)"
+
+
 def solve_vendor_lp(vendor_names, costs, budget, scores=None,
                     weight_price=0.5, weight_perf=0.5):
+    if not vendor_names:
+        return None, "Tidak ada vendor"
     try:
         prob = pulp.LpProblem("Vendor_Selection", pulp.LpMaximize)
         x = _create_binary_vars(prob, "select", vendor_names)
@@ -212,17 +234,33 @@ def solve_vendor_lp(vendor_names, costs, budget, scores=None,
         )
         prob += pulp.lpSum(x[n] for n in vendor_names) == 1
         prob += pulp.lpSum(costs[n] * x[n] for n in vendor_names) <= budget
-        prob.solve()
+
+        # cari solver yang tersedia di server
+        solver = None
+        for solver_name in ("PULP_CBC_CMD", "HiGHS", "HiGHS_CMD", "COIN_CMD"):
+            try:
+                cand = getattr(pulp, solver_name)(msg=False)
+                if cand.available():
+                    solver = cand
+                    break
+            except Exception:
+                continue
+        if solver is None:
+            return _solve_direct(vendor_names, costs, budget, scores,
+                                 weight_price, weight_perf)
+
+        prob.solve(solver)
         status = pulp.LpStatus.get(prob.status, "Unknown")
-        if status != "Optimal":
-            return None, status
-        for n in vendor_names:
-            val = pulp.value(x[n])
-            if val is not None and val > 0.5:
-                return n, status
-        return None, "No vendor selected"
-    except Exception as e:
-        return None, f"Error: {e}"
+        if status == "Optimal":
+            for n in vendor_names:
+                val = pulp.value(x[n])
+                if val is not None and val > 0.5:
+                    return n, status
+        return _solve_direct(vendor_names, costs, budget, scores,
+                             weight_price, weight_perf)
+    except Exception:
+        return _solve_direct(vendor_names, costs, budget, scores,
+                             weight_price, weight_perf)
 
 
 # ---------------------------------------------------------
