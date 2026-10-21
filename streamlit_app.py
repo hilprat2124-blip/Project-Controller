@@ -1,3 +1,4 @@
+import io
 import streamlit as st
 import pandas as pd
 import pulp
@@ -218,6 +219,90 @@ def solve_vendor_lp(vendor_names, costs, budget, scores=None,
         return None, f"Error: {e}"
 
 
+# ---------------------------------------------------------
+# HELPER IMPORT EXCEL BOQ
+# ---------------------------------------------------------
+BOQ_COLUMNS = ["No", "Item Pekerjaan", "Volume", "Satuan", "Spesifikasi", "Kompleksitas"]
+
+BOQ_ALIASES = {
+    "no": "No", "nomor": "No",
+    "item pekerjaan": "Item Pekerjaan", "item": "Item Pekerjaan",
+    "uraian pekerjaan": "Item Pekerjaan", "uraian": "Item Pekerjaan",
+    "pekerjaan": "Item Pekerjaan", "deskripsi": "Item Pekerjaan",
+    "volume": "Volume", "vol": "Volume", "qty": "Volume", "kuantitas": "Volume",
+    "satuan": "Satuan", "sat": "Satuan", "unit": "Satuan", "uom": "Satuan",
+    "spesifikasi": "Spesifikasi", "spek": "Spesifikasi", "specification": "Spesifikasi",
+    "kompleksitas": "Kompleksitas", "complexity": "Kompleksitas",
+}
+
+
+def _clean_volume(v):
+    s = str(v).strip()
+    if s.lower() in ("nan", "none"):
+        return ""
+    try:
+        f = float(s.replace(",", ""))
+        return str(int(f)) if f == int(f) else str(f)
+    except ValueError:
+        return s
+
+
+def _norm_complexity(v):
+    s = str(v).strip().lower()
+    if s in ("rendah", "low", "r"):
+        return "Rendah"
+    if s in ("tinggi", "high", "t"):
+        return "Tinggi"
+    return "Sedang"
+
+
+def parse_boq_excel(file):
+    """Baca file Excel/CSV BOQ -> list of dict. Raise ValueError jika format salah."""
+    name = getattr(file, "name", "").lower()
+    if name.endswith(".csv"):
+        df = pd.read_csv(file, dtype=str)
+    else:
+        df = pd.read_excel(file, dtype=str)
+
+    # samakan nama kolom (case-insensitive + alias)
+    rename = {}
+    for c in df.columns:
+        key = str(c).strip().lower()
+        if key in BOQ_ALIASES:
+            rename[c] = BOQ_ALIASES[key]
+    df = df.rename(columns=rename)
+
+    if "Item Pekerjaan" not in df.columns:
+        raise ValueError(
+            "Kolom 'Item Pekerjaan' tidak ditemukan. "
+            "Gunakan template yang disediakan."
+        )
+
+    for col in BOQ_COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
+
+    df = df[BOQ_COLUMNS].copy()
+    df = df[df["Item Pekerjaan"].notna() & (df["Item Pekerjaan"].astype(str).str.strip() != "")]
+    if df.empty:
+        raise ValueError("Tidak ada baris data yang valid di file.")
+
+    df["Item Pekerjaan"] = df["Item Pekerjaan"].astype(str).str.strip()
+    df["Volume"] = df["Volume"].apply(_clean_volume)
+    for col in ["Satuan", "Spesifikasi"]:
+        df[col] = df[col].fillna("").astype(str).str.strip().replace("nan", "")
+    df["Kompleksitas"] = df["Kompleksitas"].apply(_norm_complexity)
+    df["No"] = range(1, len(df) + 1)  # nomor otomatis urut
+    return df.to_dict("records")
+
+
+def boq_template_bytes():
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        default_items().to_excel(writer, index=False, sheet_name="BOQ")
+    return buf.getvalue()
+
+
 # =========================================================
 # SESSION STATE
 # =========================================================
@@ -266,6 +351,7 @@ def create_project(name, client, location, budget, deadline):
         },
         "wbs_data": None,
         "items_data": None,
+        "items_ver": 0,
         "vendor_data": {},
         "appointments": [],
     }
@@ -314,7 +400,7 @@ def default_items():
 
 
 def default_wbs():
-    # Default 7 item pekerjaan dengan harga, bobot, dan rentang minggu
+    # Default 11 item pekerjaan dengan harga, bobot, dan rentang minggu
     return pd.DataFrame([
         {"No": "A", "Item Pekerjaan": "Pekerjaan Persiapan", "Harga (juta Rp)": 28.0,
          "Mulai": 1, "Selesai": 4, "Realisasi (%)": 100.0},
@@ -666,13 +752,58 @@ if step == 1:
 
     with sub2:
         st.markdown("### BOQ — Bill of Quantities")
+
+        if active.get("items_data") is None:
+            active["items_data"] = default_items().to_dict("records")
+        if "items_ver" not in active:
+            active["items_ver"] = 0
+
+        # ---------- IMPORT EXCEL ----------
+        with st.expander("📥 Import BOQ dari Excel", expanded=False):
+            c_up, c_tpl = st.columns([3, 1])
+            with c_tpl:
+                st.download_button(
+                    "Unduh Template",
+                    data=boq_template_bytes(),
+                    file_name="template_boq.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"tpl_boq_{pid}",
+                )
+            with c_up:
+                up_file = st.file_uploader(
+                    "Upload file (.xlsx / .xls / .csv)",
+                    type=["xlsx", "xls", "csv"],
+                    key=f"boq_upload_{pid}_{active['items_ver']}",
+                )
+
+            if up_file is not None:
+                try:
+                    parsed = parse_boq_excel(up_file)
+                    st.success(f"Terbaca {len(parsed)} item. Preview:")
+                    st.dataframe(pd.DataFrame(parsed), use_container_width=True, hide_index=True)
+
+                    mode = st.radio(
+                        "Mode impor",
+                        ["Ganti semua BOQ", "Tambahkan ke BOQ yang ada"],
+                        horizontal=True, key=f"boq_mode_{pid}",
+                    )
+                    if st.button("Terapkan ke BOQ", type="primary", key=f"boq_apply_{pid}"):
+                        if mode == "Ganti semua BOQ":
+                            new_items = parsed
+                        else:
+                            new_items = list(active["items_data"]) + parsed
+                        for i, it in enumerate(new_items, start=1):
+                            it["No"] = i
+                        active["items_data"] = new_items
+                        active["items_ver"] += 1   # reset editor & uploader
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Gagal membaca file: {e}")
+
         st.caption(
             "📝 **Tabel ini bisa diedit langsung** — tambah baris, hapus, ubah nama item, "
             "volume, satuan, spesifikasi, dan kompleksitas."
         )
-
-        if active.get("items_data") is None:
-            active["items_data"] = default_items().to_dict("records")
 
         items_df = pd.DataFrame(active["items_data"])
         items_edited = st.data_editor(
@@ -680,7 +811,7 @@ if step == 1:
             use_container_width=True,
             hide_index=True,
             num_rows="dynamic",
-            key=f"items_editor_{pid}",
+            key=f"items_editor_{pid}_{active['items_ver']}",
             column_config={
                 "No": st.column_config.NumberColumn("No", min_value=1, step=1, width="small"),
                 "Item Pekerjaan": st.column_config.TextColumn("Item Pekerjaan", required=True, width="large"),
