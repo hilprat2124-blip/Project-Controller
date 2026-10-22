@@ -832,7 +832,7 @@ def _cumsum_none(vs):
     return out
 
 
-def _extract_curve(df_raw):
+def _extract_curve_weekly(df_raw):
     found = _find_week_header(df_raw)
     if found is None:
         return None
@@ -849,7 +849,7 @@ def _extract_curve(df_raw):
     series = {"plan_cum": None, "actual_cum": None, "plan_week": None, "actual_week": None}
     items = []
     for row in df_raw.iloc[hdr + 1:].values:
-        vals = [_to_number(row[j]) if j < len(row) else None for j, _ in wc]
+        vals = [_curve_num(row[j]) if j < len(row) else None for j, _ in wc]
         if all(v is None for v in vals):
             continue
         label = _norm_text(" ".join(_cell(row[k]) for k in range(min(first_col, len(row)))))
@@ -901,22 +901,207 @@ def _extract_curve(df_raw):
     return {"weeks": weeks, "plan": plan, "actual": actual}
 
 
-def parse_scurve_chart(data, name):
-    """Baca kurva S-Curve (rencana & realisasi kumulatif) dari file Excel/CSV."""
+_PLAN_TAGS = {"plan", "pan", "rencana", "rcn", "target"}
+_ACT_TAGS = {"aktual", "actual", "akt", "real", "realisasi"}
+
+
+def _curve_num(v):
+    """Angka dari sel; aman untuk notasi ilmiah (1e-05) dan format Indonesia."""
+    s = _cell(v)
+    if re.fullmatch(r"-?\d*\.?\d+[eE][-+]?\d+", s):
+        try:
+            return float(s)
+        except ValueError:
+            return None
+    return _to_number(s)
+
+
+def _find_day_header(df_raw, max_scan=60):
+    """Cari baris nomor hari (1,2,3,...) yang berada di bawah label 'Week N'.
+    Return (index_baris, [(kolom, hari), ...]) atau None."""
+    n = min(len(df_raw), max_scan)
+    for i in range(n):
+        row = list(df_raw.iloc[i].values)
+        nums = []
+        for j, c in enumerate(row):
+            s = _cell(c)
+            if re.fullmatch(r"\d+(\.0+)?", s):
+                nums.append((j, int(float(s))))
+        run, best = [], []
+        for j, d in nums:
+            if run and d == run[-1][1] + 1:
+                run.append((j, d))
+            else:
+                run = [(j, d)]
+            if len(run) > len(best):
+                best = list(run)
+        if len(best) < 14 or best[0][1] != 1:
+            continue
+        wk = 0
+        for k in range(max(0, i - 4), min(len(df_raw), i + 2)):
+            wk = max(wk, sum(1 for c in df_raw.iloc[k].values if _week_no(c) is not None))
+        if wk >= 2 and len(best) >= 3 * wk:
+            return i, best
+    return None
+
+
+def _row_tag(left_cells):
+    for t in left_cells:
+        key = re.sub(r"[^a-z]", "", t.lower())
+        if key in _PLAN_TAGS:
+            return "plan"
+        if key in _ACT_TAGS:
+            return "actual"
+    return None
+
+
+def _extract_curve_daily(df_raw, found):
+    """Format harian: kolom = hari (1..N), tiap item punya baris 'Plan' dan 'Aktual'.
+    Hasil diringkas per minggu (7 hari)."""
+    hdr, day_cols = found
+    first_col = min(j for j, _ in day_cols)
+    ndays = max(d for _, d in day_cols)
+
+    plan_items, act_items = [], []
+    sum_rows = {"plan": None, "actual": None}
+    cum_rows = {"plan": None, "actual": None}
+    for row in df_raw.iloc[hdr + 1:].values:
+        left = [_cell(row[k]) for k in range(min(first_col, len(row)))]
+        tag = _row_tag(left)
+        if tag is None:
+            continue
+        vals = [_curve_num(row[j]) if j < len(row) else None for j, _ in day_cols]
+        if all(v is None for v in vals):
+            continue
+        text = _norm_text(" ".join(left))
+        if any(k in text for k in _CUM_WORDS):
+            if cum_rows[tag] is None:
+                cum_rows[tag] = vals
+        elif _TOTAL_RE.search(text) or "progress" in text or "subtotal" in text:
+            if sum_rows[tag] is None:
+                sum_rows[tag] = vals
+        else:
+            (plan_items if tag == "plan" else act_items).append(vals)
+
+    def daily_total(rows):
+        tot = [0.0] * len(day_cols)
+        for vals in rows:
+            for i, v in enumerate(vals):
+                tot[i] += (v or 0.0)
+        return tot
+
+    if cum_rows["plan"] is not None:
+        plan_cum = _ffill(cum_rows["plan"])
+    elif sum_rows["plan"] is not None:
+        plan_cum = _cumsum_none(sum_rows["plan"])
+    elif plan_items:
+        plan_cum = _cumsum_none(daily_total(plan_items))
+    else:
+        return None
+
+    actual_cum, last_act = None, -1
+    if cum_rows["actual"] is not None:
+        src_vals = cum_rows["actual"]
+        nz = [i for i, v in enumerate(src_vals) if v]
+        if nz:
+            last_act = nz[-1]
+            prev, actual_cum = 0.0, []
+            for i in range(last_act + 1):
+                prev = src_vals[i] if src_vals[i] is not None else prev
+                actual_cum.append(prev)
+    else:
+        if sum_rows["actual"] is not None:
+            daily_act = [(v or 0.0) for v in sum_rows["actual"]]
+        elif act_items:
+            daily_act = daily_total(act_items)
+        else:
+            daily_act = None
+        if daily_act is not None:
+            nz = [i for i, v in enumerate(daily_act) if v > 0]
+            if nz:
+                last_act = nz[-1]
+                actual_cum = _cumsum_none(daily_act[:last_act + 1])
+
+    factor = 100.0 if max(plan_cum) <= 1.5 else 1.0
+    nweeks = (ndays + 6) // 7
+    weeks, plan, actual = [], [], []
+    for w in range(1, nweeks + 1):
+        start = (w - 1) * 7
+        end = min(w * 7, ndays) - 1
+        weeks.append(w)
+        plan.append(round(plan_cum[end] * factor, 2))
+        if actual_cum is not None and last_act >= start:
+            actual.append(round(actual_cum[min(end, last_act)] * factor, 2))
+        else:
+            actual.append(None)
+
+    warning = ""
+    if abs(plan[-1] - 100.0) > 2.0:
+        warning = (f"Total rencana di akhir proyek terbaca {plan[-1]:.2f}% (seharusnya sekitar 100%). "
+                   "Kemungkinan ada baris subtotal yang ikut terjumlah atau sebagian kolom hari tidak terbaca. "
+                   "Periksa file / sheet yang dipilih.")
+    return {"weeks": weeks, "plan": plan,
+            "actual": actual if actual_cum is not None else None,
+            "mode": "harian dijumlah per minggu", "warning": warning}
+
+
+def _extract_curve(df_raw):
+    found = _find_day_header(df_raw)
+    if found is not None:
+        return _extract_curve_daily(df_raw, found)
+    return _extract_curve_weekly(df_raw)
+
+
+def _curve_sheet_match(name):
+    return "scurve" in re.sub(r"[^a-z]", "", str(name).lower())
+
+
+@st.cache_data(show_spinner=False)
+def scurve_sheet_names(data, name):
+    """Daftar nama sheet di file (untuk pilihan sheet di UI)."""
     name = (name or "").lower()
     if name.endswith(".csv"):
-        sheets = {"CSV": _csv_to_frame(data)}
+        return ["CSV"]
+    try:
+        return list(pd.ExcelFile(io.BytesIO(data)).sheet_names)
+    except Exception:
+        return []
+
+
+def parse_scurve_chart(data, name, sheet=None):
+    """Baca kurva S-Curve (rencana & realisasi kumulatif) dari file Excel/CSV.
+    Otomatis mencari sheet yang namanya mengandung 'S-Curve' kecuali sheet dipilih manual."""
+    name = (name or "").lower()
+    if name.endswith(".csv"):
+        names = ["CSV"]
+        xl = None
     else:
         if name.endswith(".xlsx") and not HAS_OPENPYXL:
             raise ValueError("Library 'openpyxl' belum terpasang. Gunakan CSV atau install openpyxl.")
         try:
-            sheets = pd.read_excel(io.BytesIO(data), sheet_name=None, dtype=str, header=None)
+            xl = pd.ExcelFile(io.BytesIO(data))
         except ImportError:
             raise ValueError("Library pembaca Excel belum terpasang (openpyxl untuk .xlsx).")
         except Exception as e:
             raise ValueError(f"Gagal membaca file Excel: {e}")
+        names = list(xl.sheet_names)
 
-    for sheet_name, df_raw in sheets.items():
+    if sheet and sheet in names:
+        cands = [sheet]
+    else:
+        match = [n for n in names if _curve_sheet_match(n)]
+        cands = match or names
+
+    named = bool(not sheet and cands and all(_curve_sheet_match(c) for c in cands))
+    found_all = []
+    for sh in cands:
+        try:
+            if xl is None:
+                df_raw = _csv_to_frame(data)
+            else:
+                df_raw = xl.parse(sh, header=None, dtype=str)
+        except Exception:
+            continue
         if df_raw is None or df_raw.empty:
             continue
         try:
@@ -924,12 +1109,17 @@ def parse_scurve_chart(data, name):
         except Exception:
             res = None
         if res:
-            res["sheet"] = str(sheet_name)
-            return res
+            res["sheet"] = str(sh)
+            if sheet or named:
+                return res          # sheet dipilih manual / bernama S-Curve: langsung pakai
+            found_all.append(res)   # tidak ada sheet bernama S-Curve: ambil yang datanya terpanjang
+    if found_all:
+        return max(found_all, key=lambda r: len(r["weeks"]))
+    tried = ", ".join(str(c) for c in cands[:6])
     raise ValueError(
-        "Kurva S-Curve tidak ditemukan. Pastikan file punya header minggu (M1, M2, ...) dan baris "
-        "'Progress Rencana Kumulatif' (atau baris item per minggu). Pastikan juga nilainya sudah "
-        "terhitung (bukan rumus yang belum tersimpan)."
+        f"Kurva S-Curve tidak ditemukan di sheet: {tried}. Sheet harus punya header hari/minggu "
+        "(1,2,3,... di bawah label 'Week N', atau M1, M2, ...) dan baris 'Plan'/'Aktual' atau "
+        "'Progress Rencana Kumulatif'. Pastikan nilainya sudah terhitung (bukan rumus yang belum tersimpan)."
     )
 
 
@@ -2298,9 +2488,9 @@ elif step == 3:
                        "Minta vendor upload ulang.")
 
     st.markdown("### Grafik S-Curve dari Excel")
-    st.caption("Grafik dibuat langsung dari S-Curve di file Excel (baris Progress Rencana Kumulatif dan "
-               "Progress Realisasi Kumulatif). Jika baris kumulatif tidak ada, kurva dihitung dari "
-               "baris item / total per minggu.")
+    st.caption("Aplikasi mencari sheet bernama S-Curve di dalam file Excel, lalu membaca baris Plan dan "
+               "Aktual (atau Progress Rencana/Realisasi Kumulatif) untuk membuat grafik. Data harian "
+               "dijumlahkan per minggu.")
 
     VENDOR_OPT = "Pakai file S-Curve dari vendor"
     UPLOAD_OPT = "Upload file Excel baru"
@@ -2319,10 +2509,16 @@ elif step == 3:
         if gc_file is not None:
             chart_bytes, chart_name = gc_file.getvalue(), gc_file.name
 
+    sheet_choice = None
     if chart_bytes is not None:
+        sheets_avail = scurve_sheet_names(chart_bytes, chart_name)
+        if len(sheets_avail) > 1:
+            AUTO_OPT = "Otomatis (cari sheet bernama S-Curve)"
+            pick = st.selectbox("Sheet yang dibaca", [AUTO_OPT] + sheets_avail, key=f"sc_sheet_{pid}")
+            sheet_choice = None if pick == AUTO_OPT else pick
         if st.button("Buat / Perbarui Grafik dari File Ini", type="primary", key=f"sc_make_{pid}"):
             try:
-                res = parse_scurve_chart(chart_bytes, chart_name)
+                res = parse_scurve_chart(chart_bytes, chart_name, sheet_choice)
                 res["filename"] = chart_name
                 active["scurve_chart"] = res
                 st.success("Grafik berhasil dibuat dari file.")
@@ -2347,7 +2543,9 @@ elif step == 3:
         x = np.array(weeks)
 
         st.caption(f"Sumber grafik: {chart.get('filename', '-')} · sheet {chart.get('sheet', '-')} · "
-                   f"{len(weeks)} minggu")
+                   f"{len(weeks)} minggu" + (f" · {chart['mode']}" if chart.get("mode") else ""))
+        if chart.get("warning"):
+            st.warning(chart["warning"])
 
         if has_actual:
             default_week = weeks[int(np.where(np.isfinite(actual))[0][-1])]
