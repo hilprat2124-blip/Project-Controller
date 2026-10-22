@@ -1,4 +1,7 @@
 import io
+import re
+import csv
+import html
 import streamlit as st
 
 try:
@@ -268,32 +271,41 @@ def solve_vendor_lp(vendor_names, costs, budget, scores=None,
 # ---------------------------------------------------------
 BOQ_COLUMNS = ["No", "Item Pekerjaan", "Volume", "Satuan", "Spesifikasi", "Kompleksitas"]
 
-BOQ_ALIASES = {
-    "no": "No", "nomor": "No", "nomor item": "No",
-    "item pekerjaan": "Item Pekerjaan", "item": "Item Pekerjaan",
-    "uraian pekerjaan": "Item Pekerjaan", "uraian": "Item Pekerjaan",
-    "pekerjaan": "Item Pekerjaan", "deskripsi": "Item Pekerjaan",
-    "description": "Item Pekerjaan", "nama pekerjaan": "Item Pekerjaan",
-    "volume": "Volume", "vol": "Volume", "qty": "Volume", "kuantitas": "Volume",
-    "satuan": "Satuan", "sat": "Satuan", "unit": "Satuan", "uom": "Satuan",
-    "spesifikasi": "Spesifikasi", "spek": "Spesifikasi", "specification": "Spesifikasi",
-    "kompleksitas": "Kompleksitas", "complexity": "Kompleksitas",
-}
+WBS_COLUMNS = ["No", "Item Pekerjaan", "Harga (juta Rp)", "Mulai", "Selesai", "Realisasi (%)"]
+
+
+def _cell(v):
+    """Ubah nilai sel apa pun menjadi string bersih ('' jika kosong/NaN)."""
+    try:
+        if v is None or pd.isna(v):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    s = str(v).replace("\u00a0", " ").strip()
+    if s.lower() in ("nan", "none", "nat"):
+        return ""
+    return s
+
+
+def _norm_text(v):
+    return re.sub(r"\s+", " ", _cell(v).lower()).strip()
 
 
 def _clean_volume(v):
-    s = str(v).strip()
-    if s.lower() in ("nan", "none"):
+    s = _cell(v)
+    if not s:
         return ""
     try:
         f = float(s.replace(",", ""))
-        return str(int(f)) if f == int(f) else str(f)
-    except ValueError:
+        if f == int(f):
+            return str(int(f))
+        return str(round(f, 4))
+    except (ValueError, OverflowError):
         return s
 
 
 def _norm_complexity(v):
-    s = str(v).strip().lower()
+    s = _norm_text(v)
     if s in ("rendah", "low", "r"):
         return "Rendah"
     if s in ("tinggi", "high", "t"):
@@ -301,8 +313,202 @@ def _norm_complexity(v):
     return "Sedang"
 
 
+_PRICE_WORDS = {"harga", "jumlah", "bobot", "total", "price", "amount",
+                "biaya", "upah", "bahan", "rp"}
+_VOLUME_WORDS = {"volume", "vol", "qty", "kuantitas", "quantity"}
+_UNIT_WORDS = {"satuan", "sat", "unit", "uom"}
+_SPEC_WORDS = {"spesifikasi", "spek", "specification"}
+_COMPLEX_WORDS = {"kompleksitas", "complexity"}
+_ITEM_WORDS = {"uraian", "deskripsi", "description", "pekerjaan"}
+_ITEM_WEAK_WORDS = {"item", "nama"}
+_NO_WORDS = {"no", "nomor"}
+
+
+def _match_target(cell, weak=False):
+    """Petakan teks header satu kolom ke nama kolom standar (atau None)."""
+    key = _norm_text(cell)
+    if not key:
+        return None
+    tokens = set(re.findall(r"[a-z0-9]+", key))
+    if not tokens:
+        return None
+    # kolom harga/jumlah/bobot bukan kolom yang kita butuhkan
+    if tokens & _PRICE_WORDS:
+        return None
+    if tokens & _VOLUME_WORDS:
+        return "Volume"
+    if tokens & _UNIT_WORDS:
+        return "Satuan"
+    if tokens & _SPEC_WORDS:
+        return "Spesifikasi"
+    if tokens & _COMPLEX_WORDS:
+        return "Kompleksitas"
+    if tokens & _ITEM_WORDS:
+        return "Item Pekerjaan"
+    if tokens & _NO_WORDS:
+        return "No"
+    if weak and (tokens & _ITEM_WEAK_WORDS):
+        return "Item Pekerjaan"
+    return None
+
+
+def _build_mapping(cells):
+    """Return dict {nama_kolom_standar: indeks_kolom}. Tiap target hanya dipakai SEKALI
+    (kolom pertama yang cocok), sehingga tidak ada nama kolom ganda."""
+    mapping = {}
+    for j, c in enumerate(cells):
+        t = _match_target(c)
+        if t and t not in mapping:
+            mapping[t] = j
+    if "Item Pekerjaan" not in mapping:
+        used = set(mapping.values())
+        for j, c in enumerate(cells):
+            if j in used:
+                continue
+            if _match_target(c, weak=True) == "Item Pekerjaan":
+                mapping["Item Pekerjaan"] = j
+                break
+    return mapping
+
+
+def _header_ok(mapping):
+    return all(k in mapping for k in ("Item Pekerjaan", "Volume", "Satuan"))
+
+
+def _find_header(df_raw, max_scan=80):
+    """Cari baris header. Return (index_baris, jumlah_baris_header, mapping) atau None."""
+    n = len(df_raw)
+    for i in range(min(n, max_scan)):
+        cells = list(df_raw.iloc[i].values)
+        m = _build_mapping(cells)
+        if _header_ok(m):
+            return i, 1, m
+        if i + 1 < n:  # header yang terpecah di 2 baris
+            nxt = list(df_raw.iloc[i + 1].values)
+            comb = [(_cell(a) + " " + _cell(b)).strip() for a, b in zip(cells, nxt)]
+            m = _build_mapping(comb)
+            if _header_ok(m):
+                return i, 2, m
+    return None
+
+
+_SKIP_ROW = re.compile(
+    r"^(sub\s*total|grand\s*total|total|jumlah|ppn|pph|pajak|rekapitulasi|rekap|dibulatkan|terbilang)\b"
+)
+
+
+def _extract_items(df_raw):
+    found = _find_header(df_raw)
+    if found is None:
+        return []
+    header_idx, nrows, mapping = found
+    data = df_raw.iloc[header_idx + nrows:].values
+    ncols = data.shape[1] if data.ndim == 2 else 0
+
+    def get(row, name):
+        j = mapping.get(name)
+        if j is None or j >= ncols:
+            return ""
+        return _cell(row[j])
+
+    items = []
+    for row in data:
+        item = get(row, "Item Pekerjaan")
+        if not item:
+            continue
+        if re.fullmatch(r"[\d\.\s,]+", item):  # hanya angka -> bukan nama pekerjaan
+            continue
+        volume = _clean_volume(get(row, "Volume"))
+        if not volume and _SKIP_ROW.match(item.lower()):
+            continue
+        items.append({
+            "No": 0,
+            "Item Pekerjaan": item,
+            "Volume": volume,
+            "Satuan": get(row, "Satuan"),
+            "Spesifikasi": get(row, "Spesifikasi"),
+            "Kompleksitas": _norm_complexity(get(row, "Kompleksitas")),
+        })
+    return items
+
+
+def _decode_csv_bytes(data):
+    for enc in ("utf-8-sig", "latin-1"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
+def _csv_to_frame(data):
+    text = _decode_csv_bytes(data)
+    try:
+        dialect = csv.Sniffer().sniff(text[:4096], delimiters=",;\t")
+    except Exception:
+        dialect = csv.excel
+    rows = list(csv.reader(io.StringIO(text), dialect))
+    width = max((len(r) for r in rows), default=0)
+    rows = [r + [""] * (width - len(r)) for r in rows]
+    return pd.DataFrame(rows, dtype=object)
+
+
+@st.cache_data(show_spinner="Membaca file BOQ...")
+def _parse_boq_cached(data, name):
+    name = (name or "").lower()
+    if name.endswith(".csv"):
+        sheets = {"CSV": _csv_to_frame(data)}
+    else:
+        if name.endswith(".xlsx") and not HAS_OPENPYXL:
+            raise ValueError("Library 'openpyxl' belum terpasang. Gunakan CSV atau install openpyxl.")
+        try:
+            sheets = pd.read_excel(io.BytesIO(data), sheet_name=None, dtype=str, header=None)
+        except ImportError:
+            raise ValueError(
+                "Library pembaca Excel belum terpasang (openpyxl untuk .xlsx, xlrd untuk .xls). "
+                "Simpan file sebagai .xlsx atau CSV."
+            )
+        except Exception as e:
+            raise ValueError(f"Gagal membaca file Excel: {e}")
+
+    all_items = []
+    for _sheet_name, df_raw in sheets.items():
+        if df_raw is None or df_raw.empty:
+            continue
+        try:
+            all_items.extend(_extract_items(df_raw))
+        except Exception:
+            continue  # satu sheet bermasalah tidak boleh menggagalkan seluruh file
+
+    if not all_items:
+        raise ValueError(
+            "Tidak ada data BOQ yang bisa dibaca. Pastikan file memiliki tabel dengan "
+            "kolom Uraian/Deskripsi Pekerjaan, Volume, dan Satuan."
+        )
+    for i, it in enumerate(all_items, start=1):
+        it["No"] = i
+    return all_items
+
+
+def parse_boq_excel(file):
+    """Baca file Excel/CSV BOQ -> list of dict. Mendukung multi-sheet dan format RAB kompleks."""
+    if hasattr(file, "getvalue"):
+        data = file.getvalue()
+    else:
+        try:
+            file.seek(0)
+        except Exception:
+            pass
+        data = file.read()
+    return _parse_boq_cached(data, getattr(file, "name", ""))
+
+
 def _read_upload(file):
     """Baca file upload (Excel/CSV) -> DataFrame (semua kolom string)."""
+    try:
+        file.seek(0)
+    except Exception:
+        pass
     name = getattr(file, "name", "").lower()
     if name.endswith(".csv"):
         try:
@@ -331,19 +537,17 @@ VENDOR_ALIASES = ["vendor", "nama vendor", "nama perusahaan", "perusahaan",
 def parse_vendor_excel(file):
     """Baca daftar vendor dari Excel/CSV -> list nama unik. Raise ValueError jika kosong."""
     df = _read_upload(file)
-    col = None
-    for c in df.columns:
-        if str(c).strip().lower() in VENDOR_ALIASES:
-            col = c
-            break
-    if col is None:
-        col = df.columns[0] if len(df.columns) else None  # fallback: kolom pertama
-    if col is None:
+    if len(df.columns) == 0:
         raise ValueError("File kosong.")
+    col_idx = 0  # fallback: kolom pertama
+    for j, c in enumerate(df.columns):
+        if _norm_text(c) in VENDOR_ALIASES:
+            col_idx = j
+            break
     names = []
-    for v in df[col].dropna().astype(str):
-        v = v.strip()
-        if v and v.lower() != "nan" and v not in names:
+    for v in df.iloc[:, col_idx].tolist():
+        v = _cell(v)
+        if v and v not in names:
             names.append(v)
     if not names:
         raise ValueError("Tidak ada nama vendor yang valid di file.")
@@ -368,157 +572,8 @@ def vendor_template_bytes():
     return df.to_csv(index=False).encode("utf-8-sig"), "template_vendor.csv", "text/csv"
 
 
-def parse_boq_excel(file):
-    """Baca file Excel/CSV BOQ -> list of dict. Mendukung multi-sheet dan format RAB kompleks."""
-    name = getattr(file, "name", "").lower()
-    all_parsed_items = []
-    
-    if name.endswith(".csv"):
-        # Jika CSV, langsung baca sebagai satu sheet
-        try:
-            df_raw = pd.read_csv(file, dtype=str, header=None)
-        except UnicodeDecodeError:
-            file.seek(0)
-            df_raw = pd.read_csv(file, dtype=str, encoding="latin-1", header=None)
-        sheets = {"CSV": df_raw}
-    else:
-        if not HAS_OPENPYXL:
-            raise ValueError("Library 'openpyxl' belum terpasang. Gunakan CSV atau install openpyxl.")
-        try:
-            # Baca semua sheet sekaligus
-            sheets = pd.read_excel(file, sheet_name=None, dtype=str, header=None)
-        except Exception as e:
-            raise ValueError(f"Gagal membaca file Excel: {e}")
-
-    # Iterasi setiap sheet
-    for sheet_name, df_raw in sheets.items():
-        if df_raw.empty:
-            continue
-
-        # 1. Deteksi Baris Header
-        header_idx = None
-        for i, row in df_raw.iterrows():
-            # Ubah semua nilai baris menjadi string huruf kecil, abaikan yang kosong
-            row_str = [str(x).strip().lower() for x in row.values if pd.notna(x)]
-            
-            # Cari baris yang memiliki 'volume' DAN ('satuan'/'unit') DAN ('uraian'/'deskripsi'/'pekerjaan')
-            has_vol = any("volume" in s or "vol" in s for s in row_str)
-            has_unit = any("satuan" in s or "unit" in s for s in row_str)
-            has_desc = any("uraian" in s or "deskripsi" in s or "description" in s or "pekerjaan" in s for s in row_str)
-            
-            if has_vol and has_unit and has_desc:
-                header_idx = i
-                break
-                
-        # Jika header tidak ditemukan di sheet ini, lewati
-        if header_idx is None:
-            continue
-            
-        # Set header ke baris yang terdeteksi (paksa jadi list of string)
-        df = df_raw.iloc[header_idx + 1:].copy()
-        raw_cols = df_raw.iloc[header_idx].values
-        
-        # Bersihkan nama kolom dari float/int (misal: 1.0 -> "1", NaN -> "Unnamed")
-        clean_cols = []
-        for c in raw_cols:
-            if pd.isna(c):
-                clean_cols.append("Unnamed")
-            else:
-                clean_cols.append(str(c).strip())
-                
-        # Tangani duplikat nama kolom dengan menambahkan suffix
-        final_cols = []
-        seen = set()
-        for c in clean_cols:
-            base_c = c
-            counter = 1
-            while c in seen:
-                c = f"{base_c}_{counter}"
-                counter += 1
-            seen.add(c)
-            final_cols.append(c)
-            
-        df.columns = final_cols
-
-        # 2. Samakan nama kolom menggunakan alias
-        rename = {}
-        for c in df.columns:
-            key = str(c).strip().lower()
-            if key in BOQ_ALIASES:
-                rename[c] = BOQ_ALIASES[key]
-            else:
-                for alias, target in BOQ_ALIASES.items():
-                    if alias in key:
-                        rename[c] = target
-                        break
-                        
-        df = df.rename(columns=rename)
-
-        # 3. Validasi kolom wajib (Item Pekerjaan)
-        if "Item Pekerjaan" not in df.columns:
-            # Fallback: cari kolom teks terpanjang (kemungkinan nama pekerjaan)
-            best_col = None
-            max_len = 0
-            for c in df.columns:
-                # Hitung rata-rata panjang teks di kolom ini
-                try:
-                    avg_len = df[c].dropna().astype(str).str.len().mean()
-                    if pd.notna(avg_len) and avg_len > max_len:
-                        max_len = avg_len
-                        best_col = c
-                except Exception:
-                    pass
-            
-            if best_col and max_len > 5:
-                df = df.rename(columns={best_col: "Item Pekerjaan"})
-            else:
-                continue # Jika tetap tidak ada, lewati sheet ini
-
-        # Pastikan semua kolom standar ada
-        for col in BOQ_COLUMNS:
-            if col not in df.columns:
-                df[col] = ""
-
-        # 4. Bersihkan data
-        # Ganti NaN dengan string kosong
-        for col in BOQ_COLUMNS:
-            df[col] = df[col].fillna("").astype(str).str.strip()
-            
-        # Hapus baris yang kosong melompong (tidak ada item DAN tidak ada volume)
-        df = df[~((df["Item Pekerjaan"] == "") & (df["Volume"] == ""))]
-        
-        # Format Volume
-        df["Volume"] = df["Volume"].apply(_clean_volume)
-        
-        # Filter: Hanya ambil baris yang memiliki nama pekerjaan
-        df = df[df["Item Pekerjaan"].str.len() > 0]
-        
-        # Normalisasi Kompleksitas
-        df["Kompleksitas"] = df["Kompleksitas"].apply(_norm_complexity)
-        
-        # Tambahkan ke list global
-        if not df.empty:
-            all_parsed_items.extend(df.to_dict("records"))
-
-    if not all_parsed_items:
-        raise ValueError(
-            "Tidak ada data BOQ yang bisa dibaca. Pastikan file memiliki baris Header "
-            "yang mengandung kata 'Uraian/Deskripsi', 'Volume', dan 'Satuan'."
-        )
-
-    # 5. Penomoran Ulang untuk semua item
-    for i, item in enumerate(all_parsed_items, start=1):
-        item["No"] = i
-        
-    # Ambil hanya kolom standar
-    final_items = [{k: item.get(k, "") for k in BOQ_COLUMNS} for item in all_parsed_items]
-    
-    return final_items
-
-
 def boq_template_bytes():
     """Return (data, filename, mime) template RAB sesuai standar Excel."""
-    # Membuat DataFrame template yang menyerupai format RAB R.05
     template_data = [
         {"No": 1, "Item Pekerjaan": "BAB I. PEKERJAAN PENDAHULUAN", "Volume": "", "Satuan": "", "Spesifikasi": "", "Kompleksitas": "Rendah"},
         {"No": 2, "Item Pekerjaan": "Mobilisasi dan Demobilisasi", "Volume": "1", "Satuan": "ls", "Spesifikasi": "", "Kompleksitas": "Rendah"},
@@ -536,14 +591,13 @@ def boq_template_bytes():
         {"No": 14, "Item Pekerjaan": "Pekerjaan GWT (Ground Water Tank)", "Volume": "3.03", "Satuan": "m³", "Spesifikasi": "Beton K-300", "Kompleksitas": "Tinggi"}
     ]
     df = pd.DataFrame(template_data)
-    
+
     if HAS_OPENPYXL:
         try:
             buf = io.BytesIO()
             with pd.ExcelWriter(buf, engine="openpyxl") as writer:
                 df.to_excel(writer, index=False, sheet_name="Template BOQ")
-                
-                # Atur lebar kolom agar rapi saat dibuka di Excel
+
                 worksheet = writer.sheets["Template BOQ"]
                 worksheet.column_dimensions['A'].width = 5
                 worksheet.column_dimensions['B'].width = 50
@@ -551,7 +605,7 @@ def boq_template_bytes():
                 worksheet.column_dimensions['D'].width = 10
                 worksheet.column_dimensions['E'].width = 30
                 worksheet.column_dimensions['F'].width = 15
-                
+
             return (
                 buf.getvalue(),
                 "template_boq_rab.xlsx",
@@ -559,7 +613,7 @@ def boq_template_bytes():
             )
         except Exception:
             pass
-            
+
     return (
         df.to_csv(index=False).encode("utf-8-sig"),
         "template_boq_rab.csv",
@@ -710,7 +764,8 @@ PERFORMANCE_ASPECTS = [
 
 
 # =========================================================
-# SIDEBAR# =========================================================
+# SIDEBAR
+# =========================================================
 with st.sidebar:
     st.markdown("### Project Manager")
 
@@ -774,12 +829,11 @@ with st.sidebar:
         done, total = project_progress(active)
         st.caption(f"{done} dari {total} tahap selesai")
 
-
         st.markdown("---")
         st.markdown("**Budget & Deadline Project**")
         new_budget_edit = st.number_input(
             "Budget project (juta Rp)", min_value=10.0,
-            value=float(active["meta"]["budget"]),
+            value=max(10.0, float(active["meta"]["budget"])),
             step=10.0, key=f"edit_budget_{active['meta']['id']}",
         )
         new_deadline_edit = st.number_input(
@@ -802,8 +856,6 @@ with st.sidebar:
             )
             st.session_state.step = 0
             st.rerun()
-    else:
-        pass
 
 # =========================================================
 # HEADER
@@ -882,7 +934,7 @@ if step == 0:
     c1.metric("Total project", len(df_summary))
     total_budget = sum(p["meta"]["budget"] for p in st.session_state.projects.values())
     c2.metric("Total budget", format_rupiah(total_budget))
-    c3.metric("Project selesai", df_summary[df_summary["Status"] == "Selesai"].shape[0])
+    c3.metric("Project selesai", int((df_summary["Status"] == "Selesai").sum()))
 
     st.markdown("---")
     st.dataframe(df_summary, use_container_width=True, hide_index=True)
@@ -987,12 +1039,12 @@ if step == 1:
             )
             rab_awal_input = st.number_input(
                 "RAB Estimasi (juta Rp)", min_value=10.0,
-                value=float(meta.get("rab_awal", meta.get("budget", 300.0))),
+                value=max(10.0, float(meta.get("rab_awal", meta.get("budget", 300.0)))),
                 step=10.0, key=f"rab_awal_{meta['id']}",
             )
             budget_input = st.number_input(
                 "Budget approved (juta Rp)", min_value=10.0,
-                value=float(meta.get("budget", 300.0)),
+                value=max(10.0, float(meta.get("budget", 300.0))),
                 step=10.0, key=f"budget_tender_{meta['id']}",
             )
             st.metric("Selisih", format_rupiah(budget_input - rab_awal_input))
@@ -1048,9 +1100,9 @@ if step == 1:
                     )
                     if st.button("Terapkan ke BOQ", type="primary", key=f"boq_apply_{pid}"):
                         if mode == "Ganti semua BOQ":
-                            new_items = parsed
+                            new_items = [dict(it) for it in parsed]
                         else:
-                            new_items = list(active["items_data"]) + parsed
+                            new_items = list(active["items_data"]) + [dict(it) for it in parsed]
                         for i, it in enumerate(new_items, start=1):
                             it["No"] = i
                         active["items_data"] = new_items
@@ -1064,7 +1116,7 @@ if step == 1:
             "volume, satuan, spesifikasi, dan kompleksitas."
         )
 
-        items_df = pd.DataFrame(active["items_data"])
+        items_df = pd.DataFrame(active["items_data"], columns=BOQ_COLUMNS)
         items_edited = st.data_editor(
             items_df,
             use_container_width=True,
@@ -1088,7 +1140,7 @@ if step == 1:
     dokumen_lengkap = all([doc_drawing, doc_rks, doc_spek, doc_boq, doc_k3])
     catatan_lengkap = len(catatan.strip()) >= 10
     timeline_valid = tgl_aanwijzing < tgl_penawaran < tgl_kontrak
-    items_ok = active.get("items_data") and len(active["items_data"]) > 0
+    items_ok = bool(active.get("items_data")) and len(active["items_data"]) > 0
     form_valid = dokumen_lengkap and catatan_lengkap and timeline_valid and items_ok
 
     if not form_valid:
@@ -1209,7 +1261,7 @@ elif step == 2:
                     if st.button("Terapkan ke Daftar Vendor", type="primary",
                                  key=f"vendor_apply_{pid}"):
                         if v_mode == "Ganti semua vendor":
-                            new_list = v_parsed
+                            new_list = list(v_parsed)
                         else:
                             new_list = list(active["invited_vendors"])
                             for nm in v_parsed:
@@ -1227,7 +1279,10 @@ elif step == 2:
             num_rows="dynamic", key=f"invited_{pid}_{active['invited_ver']}",
             column_config={"Vendor": st.column_config.TextColumn("Vendor", required=True)},
         )
-        active["invited_vendors"] = invited_edited["Vendor"].dropna().tolist()
+        active["invited_vendors"] = [
+            str(v).strip() for v in invited_edited["Vendor"].dropna().tolist()
+            if str(v).strip()
+        ]
 
     with sub2:
         st.markdown("### Input Data Vendor")
@@ -1328,6 +1383,7 @@ elif step == 2:
             if not active["appointments"]:
                 st.info("Belum ada appointment.")
             else:
+                status_options = ["Terjadwal", "Berlangsung", "Selesai", "Dibatalkan"]
                 for i, appt in enumerate(active["appointments"]):
                     with st.expander(
                         f"[{appt['status']}] {appt['vendor']} · {appt['mode']} · {appt['date']} {appt['time']}",
@@ -1344,10 +1400,11 @@ elif step == 2:
                             st.markdown(f"**Peserta vendor:** {appt['vendor_participants'] or '-'}")
                             st.markdown(f"**Agenda:** {appt['agenda']}")
                         st.markdown("---")
+                        cur_status = appt["status"] if appt["status"] in status_options else "Terjadwal"
                         new_status = st.selectbox(
                             "Status",
-                            ["Terjadwal", "Berlangsung", "Selesai", "Dibatalkan"],
-                            index=["Terjadwal", "Berlangsung", "Selesai", "Dibatalkan"].index(appt["status"]),
+                            status_options,
+                            index=status_options.index(cur_status),
                             key=f"as_{appt['id']}",
                         )
                         hasil = st.text_area("Hasil klarifikasi", value=appt.get("hasil", ""),
@@ -1434,13 +1491,14 @@ elif step == 2:
         st.markdown("### Deal Harga & SPK")
         optimized_vendor = st.session_state.get(f"optimized_vendor_{pid}")
         optimized_cost = st.session_state.get(f"optimized_cost_{pid}", 0)
+        vendor_data = active.get("vendor_data", {})
 
         if not optimized_vendor:
             st.warning("Selesaikan optimasi dulu (sub-tab 4).")
         else:
             st.markdown(
                 f"<div class='hint-box'>"
-                f"<b>Vendor:</b> {optimized_vendor}<br>"
+                f"<b>Vendor:</b> {html.escape(str(optimized_vendor))}<br>"
                 f"<b>Harga penawaran awal:</b> {format_rupiah(optimized_cost)}"
                 f"</div>",
                 unsafe_allow_html=True,
@@ -1450,7 +1508,7 @@ elif step == 2:
             with c1:
                 final_price = st.number_input(
                     "Harga kesepakatan (juta Rp)",
-                    min_value=1.0, value=float(optimized_cost), step=5.0,
+                    min_value=1.0, value=max(1.0, float(optimized_cost)), step=5.0,
                     key=f"fp_{pid}",
                 )
             with c2:
@@ -1474,7 +1532,7 @@ elif step == 2:
 
             negosiasi_notes = st.text_area("Catatan Negosiasi", height=100, key=f"ngn_{pid}")
 
-            valid = (
+            valid = bool(
                 spk_number and len(spk_number.strip()) >= 5
                 and spk_signer and len(spk_signer.strip()) >= 3
                 and approval_drawing == "Disetujui"
@@ -1550,8 +1608,8 @@ elif step == 3:
     if active.get("wbs_data") is None:
         active["wbs_data"] = default_wbs().to_dict("records")
 
-    wbs_df = pd.DataFrame(active["wbs_data"])
-    wbs_edited = st.data_editor(
+    wbs_df = pd.DataFrame(active["wbs_data"], columns=WBS_COLUMNS)
+    wbs_raw = st.data_editor(
         wbs_df,
         use_container_width=True,
         hide_index=True,
@@ -1570,7 +1628,23 @@ elif step == 3:
             ),
         },
     )
-    active["wbs_data"] = wbs_edited.to_dict("records")
+    active["wbs_data"] = wbs_raw.to_dict("records")
+
+    # ---------- Bersihkan input (baris baru yang masih kosong tidak boleh bikin error) ----------
+    wbs_edited = wbs_raw.copy()
+    wbs_edited["Item Pekerjaan"] = wbs_edited["Item Pekerjaan"].fillna("").astype(str).str.strip()
+    wbs_edited = wbs_edited[wbs_edited["Item Pekerjaan"] != ""].copy()
+    wbs_edited["No"] = wbs_edited["No"].fillna("").astype(str)
+    wbs_edited["Harga (juta Rp)"] = pd.to_numeric(
+        wbs_edited["Harga (juta Rp)"], errors="coerce").fillna(0.0).clip(lower=0.0)
+    wbs_edited["Realisasi (%)"] = pd.to_numeric(
+        wbs_edited["Realisasi (%)"], errors="coerce").fillna(0.0).clip(lower=0.0, upper=100.0)
+    wbs_edited["Mulai"] = pd.to_numeric(
+        wbs_edited["Mulai"], errors="coerce").fillna(1).clip(lower=1).astype(int)
+    wbs_edited["Selesai"] = pd.to_numeric(
+        wbs_edited["Selesai"], errors="coerce").fillna(1).clip(lower=1).astype(int)
+    wbs_edited["Selesai"] = np.maximum(wbs_edited["Selesai"].values, wbs_edited["Mulai"].values)
+    wbs_edited = wbs_edited.reset_index(drop=True)
 
     if wbs_edited.empty:
         st.warning("Tabel WBS kosong.")
@@ -1592,7 +1666,6 @@ elif step == 3:
     max_week = int(wbs_edited["Selesai"].max())
     weeks = list(range(1, max_week + 1))
 
-    # matrix distribusi: rows = item, cols = minggu
     distrib_matrix = []
     for _, row in wbs_edited.iterrows():
         w_start = int(row["Mulai"])
@@ -1611,7 +1684,6 @@ elif step == 3:
                 week_vals[w - 1] = round(float(weekly[i]), 2)
         distrib_matrix.append(week_vals)
 
-    # total per minggu
     total_per_week = np.sum(distrib_matrix, axis=0).round(2)
     cum_plan = np.cumsum(total_per_week).round(2)
 
@@ -1624,9 +1696,10 @@ elif step == 3:
         value=min(max_week, max(1, int(max_week * 0.6))),
         step=1, key=f"current_week_{pid}",
     )
+    current_week = int(current_week)
 
     distrib_actual = []
-    for idx, row in wbs_edited.iterrows():
+    for _, row in wbs_edited.iterrows():
         w_start = int(row["Mulai"])
         w_end = int(row["Selesai"])
         bobot = float(row["Bobot (%)"])
@@ -1635,17 +1708,14 @@ elif step == 3:
 
         week_vals = [0.0] * max_week
         if span > 0 and bobot > 0 and realisasi_pct > 0:
-            # bentuk S penuh
             ts = np.linspace(0, 1, span + 1)
             s_vals = np.array([sigmoid_kernel(t, k=4.0) for t in ts])
             weekly_plan = np.diff(s_vals) * bobot
             if weekly_plan.sum() > 0:
                 weekly_plan = weekly_plan / weekly_plan.sum() * bobot
 
-            # realisasi = bentuk S yang sama × (realisasi_pct/100)
             weekly_actual_full = weekly_plan * (realisasi_pct / 100.0)
 
-            # cut-off di current_week
             w_cut = min(current_week, w_end)
             if w_cut >= w_start:
                 for i, w in enumerate(range(w_start, w_cut + 1)):
@@ -1660,7 +1730,6 @@ elif step == 3:
     # ---------------------------------------------------------
     st.markdown("### Tabel S-Curve Mingguan")
 
-    # Header
     header_cells = (
         "<th style='text-align:left;'>No</th>"
         "<th style='text-align:left;'>Uraian Pekerjaan</th>"
@@ -1670,12 +1739,11 @@ elif step == 3:
     for w in weeks:
         header_cells += f"<th>M{w}</th>"
 
-    # Baris item
     body_rows = ""
     for i, row in wbs_edited.iterrows():
         body_rows += "<tr>"
-        body_rows += f"<td class='text-left'>{row['No']}</td>"
-        body_rows += f"<td class='text-left'>{row['Item Pekerjaan']}</td>"
+        body_rows += f"<td class='text-left'>{html.escape(str(row['No']))}</td>"
+        body_rows += f"<td class='text-left'>{html.escape(str(row['Item Pekerjaan']))}</td>"
         body_rows += f"<td>Rp {row['Harga (juta Rp)']:,.0f}</td>"
         body_rows += f"<td>{row['Bobot (%)']:.2f}%</td>"
         for w_idx in range(max_week):
@@ -1686,17 +1754,15 @@ elif step == 3:
                 body_rows += "<td>-</td>"
         body_rows += "</tr>"
 
-    # Baris Total
     body_rows += "<tr class='total-row'>"
     body_rows += "<td class='text-left'></td>"
     body_rows += "<td class='text-left'>Total</td>"
     body_rows += f"<td>Rp {total_harga:,.0f}</td>"
-    body_rows += "<td>100.00%</td>"
+    body_rows += "<td>100.00%</td>" if total_harga > 0 else "<td>0.00%</td>"
     for val in total_per_week:
         body_rows += f"<td>{val:.2f}%</td>" if val > 0 else "<td>-</td>"
     body_rows += "</tr>"
 
-    # Baris Progress Rencana Kumulatif
     body_rows += "<tr class='cum-row'>"
     body_rows += "<td class='text-left'></td>"
     body_rows += "<td class='text-left'>Progress Rencana Kumulatif</td>"
@@ -1705,7 +1771,6 @@ elif step == 3:
         body_rows += f"<td>{val:.2f}%</td>"
     body_rows += "</tr>"
 
-    # Baris Total Realisasi per Minggu
     body_rows += "<tr>"
     body_rows += "<td class='text-left'></td>"
     body_rows += "<td class='text-left'>Total Realisasi per Minggu</td>"
@@ -1714,7 +1779,6 @@ elif step == 3:
         body_rows += f"<td>{val:.2f}%</td>" if val > 0 else "<td>-</td>"
     body_rows += "</tr>"
 
-    # Baris Progress Realisasi Kumulatif
     body_rows += "<tr class='actual-cum-row'>"
     body_rows += "<td class='text-left'></td>"
     body_rows += "<td class='text-left'>Progress Realisasi Kumulatif</td>"
@@ -1754,8 +1818,8 @@ elif step == 3:
     ax.axvline(current_week, linestyle=":", color="#6b7280",
                linewidth=1.5, label=f"Minggu ini (M{current_week})")
 
-    plan_now = cum_plan[current_week - 1]
-    actual_now = cum_actual[current_week - 1]
+    plan_now = float(cum_plan[current_week - 1])
+    actual_now = float(cum_actual[current_week - 1])
 
     ax.scatter([current_week], [plan_now], color="#1e40af", s=100,
                zorder=5, edgecolor="white", linewidth=2)
@@ -1775,7 +1839,7 @@ elif step == 3:
     ax.set_ylabel("Progress Kumulatif (%)", fontsize=10)
     ax.set_title(f"S-Curve — {selected_vendor}", fontsize=12, fontweight="600")
     ax.set_ylim(0, 105)
-    ax.set_xlim(1, max_week)
+    ax.set_xlim(1, max(max_week, 2))
     ax.set_xticks(weeks)
     ax.tick_params(labelsize=9)
     ax.legend(fontsize=9, loc="lower right")
@@ -1789,7 +1853,7 @@ elif step == 3:
     # KPI
     # ---------------------------------------------------------
     deviasi = actual_now - plan_now
-    spi = actual_now / plan_now if plan_now > 0 else 0
+    spi = actual_now / plan_now if plan_now > 0 else 0.0
 
     sc1, sc2, sc3, sc4 = st.columns(4)
     sc1.metric(f"Rencana (M{current_week})", f"{plan_now:.2f}%")
@@ -1808,15 +1872,13 @@ elif step == 3:
     # UNDUH CSV
     # ---------------------------------------------------------
     with st.expander("Unduh Data S-Curve"):
-        # bentuk dataframe dengan kolom M1..Mn
         cols = ["No", "Uraian Pekerjaan", "Harga (juta Rp)", "Bobot (%)"] + [f"M{w}" for w in weeks]
         rows_export = []
         for i, row in wbs_edited.iterrows():
             r = [row["No"], row["Item Pekerjaan"], row["Harga (juta Rp)"], row["Bobot (%)"]]
             r += distrib_matrix[i]
             rows_export.append(r)
-        # total
-        rows_export.append(["", "Total", total_harga, 100.00] + list(total_per_week))
+        rows_export.append(["", "Total", total_harga, 100.00 if total_harga > 0 else 0.0] + list(total_per_week))
         rows_export.append(["", "Progress Rencana Kumulatif", "", ""] + list(cum_plan))
         rows_export.append(["", "Total Realisasi per Minggu", "", ""] + list(total_actual_per_week))
         rows_export.append(["", "Progress Realisasi Kumulatif", "", ""] + list(cum_actual))
@@ -1924,7 +1986,7 @@ elif step == 4:
     if live:
         c1, c2 = st.columns(2)
         c1.metric("Status akhir", live.get("final_status", "-"))
-        c2.metric("BAST", live.get("bast_number", "-"))
+        c2.metric("BAST", live.get("bast_number", "-") or "-")
         st.caption(f"Terakhir disimpan: {live.get('timestamp', '-')}")
         st.markdown("---")
 
@@ -1965,7 +2027,7 @@ elif step == 4:
     status_valid = final_status in ["Ya", "Tidak"]
 
     if status_valid and final_status == "Ya":
-        bast_valid = (
+        bast_valid = bool(
             bast_number and len(bast_number.strip()) >= 5
             and approved_by and len(approved_by.strip()) >= 3
             and bast_notes and len(bast_notes.strip()) >= 10
