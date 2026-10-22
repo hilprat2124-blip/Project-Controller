@@ -952,9 +952,11 @@ def vendor_page(email):
         except Exception:
             ex = []
         cur = ex[0] if ex else {}
+        # Durasi ditetapkan KPDP (deadline project), vendor tidak bisa mengubah
+        durasi = int(pub.get("deadline") or 0)
         if cur:
             st.success(f"Penawaran terakhir dikirim: {fmt_ts(cur.get('updated_at'))} "
-                       f"({format_rupiah(cur.get('harga_rab', 0))}, {cur.get('durasi')} hari). "
+                       f"({format_rupiah(cur.get('harga_rab', 0))}, {durasi} hari). "
                        "Anda bisa mengubahnya selama KPDP belum menutup tender.")
 
         c1, c2 = st.columns(2)
@@ -963,9 +965,8 @@ def vendor_page(email):
                                     value=float(cur.get("harga_rab") or 0.0),
                                     key=f"v_harga_{pid_sel}")
         with c2:
-            durasi = st.number_input("Durasi (hari)", min_value=1, step=1,
-                                     value=int(cur.get("durasi") or 60),
-                                     key=f"v_dur_{pid_sel}")
+            st.number_input("Durasi (hari) — ditetapkan KPDP", value=durasi,
+                            disabled=True, key=f"v_dur_{pid_sel}_{durasi}")
         catatan = st.text_area("Catatan", value=cur.get("catatan") or "", height=100,
                                key=f"v_cat_{pid_sel}")
 
@@ -1110,7 +1111,7 @@ def default_wbs():
 # LIVE: PENAWARAN VENDOR (auto-refresh tiap 3 detik)
 # =========================================================
 @st.fragment(run_every=3)
-def live_penawaran(pid, invited):
+def live_penawaran(pid, invited, deadline_days):
     pen = fetch_penawaran(pid)
     rows = []
     sent = 0
@@ -1124,7 +1125,7 @@ def live_penawaran(pid, invited):
             "Email": em or "(belum diisi)",
             "Status": "Sudah mengirim" if r else "Belum mengirim",
             "Penawaran (juta Rp)": float(r["harga_rab"]) if r else None,
-            "Durasi (hari)": int(r["durasi"]) if r else None,
+            "Durasi (hari)": int(deadline_days) if r else None,
             "Catatan": (r.get("catatan") or "") if r else "",
             "Update terakhir": fmt_ts(r.get("updated_at")) if r else "-",
         })
@@ -1142,7 +1143,7 @@ def live_penawaran(pid, invited):
 # LIVE: RANKING PENAWARAN (urut harga terendah, auto-refresh)
 # =========================================================
 @st.fragment(run_every=3)
-def live_ranking(pid, invited, budget):
+def live_ranking(pid, invited, budget, deadline_days):
     pen = fetch_penawaran(pid)
     data = []
     for v in invited:
@@ -1152,12 +1153,12 @@ def live_ranking(pid, invited, budget):
         data.append({
             "Vendor": v["Vendor"],
             "harga": harga_v,
-            "durasi": int(r["durasi"]) if r and r.get("durasi") else 0,
+            "durasi": int(deadline_days) if harga_v > 0 else 0,
             "updated": r.get("updated_at") if r else None,
         })
 
     sudah = sorted([d for d in data if d["harga"] > 0],
-                   key=lambda d: (d["harga"], d["durasi"]))
+                   key=lambda d: (d["harga"], str(d["updated"] or "")))
     belum = [d for d in data if d["harga"] <= 0]
 
     rows = []
@@ -1686,7 +1687,7 @@ elif step == 2:
             st.warning("Belum ada vendor diundang.")
         else:
             save_project(pid)  # pastikan undangan vendor sudah di database
-            live_penawaran(pid, invited)
+            live_penawaran(pid, invited, deadline)
 
     # ---------- 3. APPOINTMENT ----------
     with sub3:
@@ -1784,7 +1785,7 @@ elif step == 2:
     for v in invited:
         r = pen_now.get(v["Email"].lower()) if v["Email"] else None
         harga[v["Vendor"]] = float(r["harga_rab"]) if r else 0.0
-        durasi_map[v["Vendor"]] = int(r["durasi"]) if r else 0
+        durasi_map[v["Vendor"]] = int(deadline) if r else 0
 
     # ---------- 4. OPTIMASI ----------
     with sub4:
@@ -1805,7 +1806,7 @@ elif step == 2:
             st.caption("Optimasi memilih vendor dengan **penawaran harga terendah** yang masih dalam budget.")
 
             st.markdown("#### Data untuk Optimasi (Ranking Penawaran)")
-            live_ranking(pid, invited, budget)
+            live_ranking(pid, invited, budget, deadline)
 
             eligible = [n for n in invited_names if harga[n] > 0 and harga[n] <= budget]
 
