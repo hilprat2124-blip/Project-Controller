@@ -1142,10 +1142,6 @@ def vendor_page(email):
                     f"template dari KPDP. Durasi project {pub.get('deadline')} hari "
                     f"(maksimal minggu ke-{max_week}).")
 
-            tpl_bytes, tpl_name, tpl_mime = scurve_template_bytes(max_week)
-            st.download_button("Unduh Template S-Curve", data=tpl_bytes, file_name=tpl_name,
-                               mime=tpl_mime, key=f"tpl_sc_{pid_sel}")
-
             sc_cur = fetch_scurve(pid_sel, email)
             if sc_cur:
                 st.success(f"S-Curve terakhir diupload: {fmt_ts(sc_cur.get('uploaded_at'))} · "
@@ -1176,7 +1172,11 @@ def vendor_page(email):
                     st.success(f"Terbaca {len(sc_rows)} item pekerjaan, total {format_rupiah(sc_total)}. Preview:")
                     st.dataframe(pd.DataFrame(sc_rows, columns=SCURVE_COLUMNS),
                                  use_container_width=True, hide_index=True)
-                    if st.button("Kirim S-Curve", type="primary", key=f"sc_send_{pid_sel}"):
+                    
+                    # Validasi tambahan: Pastikan tidak ada data kosong yang lolos
+                    if sc_total <= 0:
+                        st.error("Total harga S-Curve harus lebih dari 0.")
+                    elif st.button("Kirim S-Curve", type="primary", key=f"sc_send_{pid_sel}"):
                         try:
                             db().table("scurve").upsert({
                                 "project_id": pid_sel, "vendor_email": email,
