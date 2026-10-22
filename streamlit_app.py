@@ -680,117 +680,126 @@ def boq_template_bytes():
 
 
 # =========================================================
-# HELPER S-CURVE VENDOR (template + parser)
+# HELPER S-CURVE VENDOR (format baku + parser ketat)
 # =========================================================
-SCURVE_COLUMNS = ["No", "Uraian Pekerjaan", "Harga (juta Rp)", "Mulai (Minggu)", "Selesai (Minggu)"]
-_SC_ALIASES = {
-    "No": ["no", "nomor"],
-    "Uraian Pekerjaan": ["uraian pekerjaan", "item pekerjaan", "uraian", "pekerjaan",
-                         "deskripsi", "description"],
-    "Harga (juta Rp)": ["harga (juta rp)", "harga (juta rp.)", "harga (juta)", "harga",
-                        "nilai (juta rp)", "nilai"],
-    "Mulai (Minggu)": ["mulai (minggu)", "mulai (m)", "mulai", "start"],
-    "Selesai (Minggu)": ["selesai (minggu)", "selesai (m)", "selesai", "finish", "end"],
-}
+SCURVE_FIXED = ["No", "Uraian Pekerjaan", "Harga (juta Rp)", "Bobot (%)"]
 
 
-def scurve_template_bytes(max_week):
-    """Template S-Curve yang harus diisi vendor terpilih."""
-    mw = max(1, int(max_week))
-    spans = [("A", "Pekerjaan Persiapan", 0.0, 0.2),
-             ("B", "Pekerjaan Struktur", 0.15, 0.6),
-             ("C", "Pekerjaan Arsitektur", 0.5, 0.9),
-             ("D", "Pekerjaan Finishing", 0.8, 1.0)]
-    rows = []
-    for no, name, a, b in spans:
-        s = max(1, int(round(a * mw)))
-        e = max(s, min(mw, int(round(b * mw))))
-        rows.append({"No": no, "Uraian Pekerjaan": name, "Harga (juta Rp)": None,
-                     "Mulai (Minggu)": s, "Selesai (Minggu)": e})
-    df = pd.DataFrame(rows, columns=SCURVE_COLUMNS)
-    guide = pd.DataFrame({"Petunjuk": [
-        "1. Isi sheet 'S-Curve'. Jangan ubah nama kolom di baris pertama.",
-        "2. Hapus/ubah baris contoh, lalu isi semua item pekerjaan Anda.",
-        "3. Harga (juta Rp): nilai tiap item dalam juta rupiah, harus lebih dari 0.",
-        f"4. Mulai/Selesai: nomor minggu (bilangan bulat), antara 1 dan {mw}.",
-        "5. Selesai tidak boleh lebih kecil dari Mulai.",
-        "6. Total harga seluruh item sebaiknya sama dengan nilai kontrak (SPK).",
-        "7. Simpan sebagai .xlsx lalu upload di Portal Vendor.",
-    ]})
-    if HAS_OPENPYXL:
-        try:
-            buf = io.BytesIO()
-            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                df.to_excel(writer, index=False, sheet_name="S-Curve")
-                guide.to_excel(writer, index=False, sheet_name="Petunjuk")
-                ws = writer.sheets["S-Curve"]
-                for col, w in zip("ABCDE", (8, 42, 18, 16, 16)):
-                    ws.column_dimensions[col].width = w
-                writer.sheets["Petunjuk"].column_dimensions["A"].width = 90
-            return (buf.getvalue(), "template_scurve.xlsx",
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        except Exception:
-            pass
-    return df.to_csv(index=False).encode("utf-8-sig"), "template_scurve.csv", "text/csv"
+def scurve_expected_headers(max_week):
+    """Header baku: kolom tetap + M1..Mn (n = durasi project dalam minggu)."""
+    return SCURVE_FIXED + [f"M{w}" for w in range(1, int(max_week) + 1)]
+
+
+def scurve_format_example(max_week):
+    """Contoh tampilan format baku (hanya untuk ditampilkan, bukan untuk diunduh)."""
+    cols = scurve_expected_headers(max_week)
+
+    def row(no, name, harga, bobot, start, vals):
+        r = {c: "" for c in cols}
+        r.update({"No": no, "Uraian Pekerjaan": name,
+                  "Harga (juta Rp)": harga, "Bobot (%)": bobot})
+        for k, v in enumerate(vals):
+            if start + k <= max_week:
+                r[f"M{start + k}"] = v
+        return r
+
+    return pd.DataFrame([
+        row("A", "Pekerjaan Persiapan", "40", "40.00", 1, ["5.00", "10.00", "15.00", "10.00"]),
+        row("B", "Pekerjaan Struktur", "60", "60.00", 3, ["10.00", "20.00", "20.00", "10.00"]),
+    ], columns=cols)
+
+
+def scurve_row_span(r):
+    """Minggu mulai & selesai sebuah item (dari kolom mingguan M1..Mn)."""
+    if r.get("Mulai (Minggu)") and r.get("Selesai (Minggu)"):  # format lama
+        return int(r["Mulai (Minggu)"]), int(r["Selesai (Minggu)"])
+    ws = []
+    for k, v in r.items():
+        m = re.fullmatch(r"M(\d+)", str(k))
+        if m:
+            try:
+                if float(v or 0) > 0:
+                    ws.append(int(m.group(1)))
+            except (TypeError, ValueError):
+                pass
+    return (min(ws), max(ws)) if ws else (1, 1)
 
 
 def parse_scurve_file(file, max_week):
-    """Baca & validasi file S-Curve vendor. Return (rows, errors)."""
+    """Baca & validasi S-Curve vendor. Format harus sama persis dengan format baku.
+    Return (rows, errors)."""
     df = _read_upload(file)
-    colmap = {}
-    for j, c in enumerate(df.columns):
-        key = _norm_text(c)
-        for target, aliases in _SC_ALIASES.items():
-            if key in aliases and target not in colmap:
-                colmap[target] = j
-                break
-    missing = [t for t in SCURVE_COLUMNS if t != "No" and t not in colmap]
-    if missing:
-        return [], ["Kolom tidak ditemukan: " + ", ".join(missing)
-                    + ". Gunakan template yang diberikan dan jangan ubah nama kolom."]
-
-    def raw(row, name):
-        j = colmap.get(name)
-        return _cell(row.iloc[j]) if j is not None else ""
-
-    def as_int(s):
-        n = _to_number(s)
-        if n is None or abs(n - round(n)) > 1e-9:
-            return None
-        return int(round(n))
+    expected = scurve_expected_headers(max_week)
+    got = [re.sub(r"\s+", " ", _cell(c)) for c in df.columns]
+    if got != expected:
+        missing = [h for h in expected if h not in got]
+        extra = [h for h in got if h not in expected]
+        msgs = ["Header kolom tidak sama persis dengan format baku."]
+        if missing:
+            msgs.append("Kolom kurang: " + ", ".join(missing[:10]) + (" ..." if len(missing) > 10 else ""))
+        if extra:
+            msgs.append("Kolom tidak dikenal: " + ", ".join(extra[:10]) + (" ..." if len(extra) > 10 else ""))
+        if not missing and not extra:
+            msgs.append("Urutan kolom berbeda dari format baku.")
+        return [], msgs
 
     rows, errors = [], []
     for idx, (_, row) in enumerate(df.iterrows()):
         line = idx + 2  # baris di Excel (baris 1 = header)
-        item = raw(row, "Uraian Pekerjaan")
-        h_raw, m_raw, s_raw = raw(row, "Harga (juta Rp)"), raw(row, "Mulai (Minggu)"), raw(row, "Selesai (Minggu)")
-        if not (item or h_raw or m_raw or s_raw):
+        vals = [_cell(row.iloc[j]) for j in range(len(expected))]
+        if not any(vals):
             continue
-        if item.lower() in ("total", "jumlah", "grand total"):
+        no, item, h_raw, b_raw = vals[:4]
+        low = item.lower()
+        if low in ("total", "jumlah", "grand total") or low.startswith("progress"):
             continue
         if not item:
             errors.append(f"Baris {line}: uraian pekerjaan kosong.")
             continue
         harga_v = _to_number(h_raw)
         if harga_v is None or harga_v <= 0:
-            errors.append(f"Baris {line} ({item}): harga harus berupa angka lebih dari 0.")
+            errors.append(f"Baris {line} ({item}): Harga harus angka lebih dari 0.")
             continue
-        mulai, selesai = as_int(m_raw), as_int(s_raw)
-        if mulai is None or selesai is None:
-            errors.append(f"Baris {line} ({item}): Mulai/Selesai harus bilangan bulat (nomor minggu).")
+        bobot_v = _to_number(b_raw)
+        if bobot_v is None or bobot_v <= 0 or bobot_v > 100:
+            errors.append(f"Baris {line} ({item}): Bobot (%) harus angka antara 0 dan 100.")
             continue
-        if mulai < 1 or selesai > max_week:
-            errors.append(f"Baris {line} ({item}): minggu harus antara 1 dan {max_week}.")
+        weekly, bad = [], False
+        for w, s in enumerate(vals[4:], start=1):
+            if s in ("", "-", "–", "—"):
+                weekly.append(0.0)
+                continue
+            n = _to_number(s)
+            if n is None or n < 0:
+                errors.append(f"Baris {line} ({item}): kolom M{w} bukan angka yang valid.")
+                bad = True
+                break
+            weekly.append(float(n))
+        if bad:
             continue
-        if selesai < mulai:
-            errors.append(f"Baris {line} ({item}): Selesai lebih kecil dari Mulai.")
+        if sum(weekly) <= 0:
+            errors.append(f"Baris {line} ({item}): tidak ada progress mingguan.")
             continue
-        rows.append({"No": raw(row, "No"), "Uraian Pekerjaan": item,
-                     "Harga (juta Rp)": float(harga_v),
-                     "Mulai (Minggu)": mulai, "Selesai (Minggu)": selesai})
+        if abs(sum(weekly) - bobot_v) > 0.1:
+            errors.append(f"Baris {line} ({item}): jumlah M1..M{max_week} ({sum(weekly):.2f}) "
+                          f"tidak sama dengan Bobot ({bobot_v:.2f}).")
+            continue
+        r = {"No": no, "Uraian Pekerjaan": item,
+             "Harga (juta Rp)": float(harga_v), "Bobot (%)": float(bobot_v)}
+        for w, v in enumerate(weekly, start=1):
+            r[f"M{w}"] = round(v, 4)
+        rows.append(r)
+
     if not rows and not errors:
         errors.append("Tidak ada baris data di file.")
-    return rows, errors
+    if rows and not errors:
+        total = sum(r["Harga (juta Rp)"] for r in rows)
+        for r in rows:
+            exp_b = r["Harga (juta Rp)"] / total * 100
+            if abs(exp_b - r["Bobot (%)"]) > 0.1:
+                errors.append(f"{r['Uraian Pekerjaan']}: Bobot {r['Bobot (%)']:.2f}% tidak sesuai "
+                              f"Harga / Total Harga ({exp_b:.2f}%).")
+    return (rows if not errors else []), errors
 
 
 # =========================================================
@@ -1652,3 +1661,1002 @@ if step == 1:
         with col2:
             st.markdown("#### RAB Awal (Estimasi Kita)")
             st.markdown(
+                f"<div class='hint-box'>Budget project: <b>{format_rupiah(meta['budget'])}</b>.</div>",
+                unsafe_allow_html=True,
+            )
+            rab_awal_input = st.number_input(
+                "RAB Estimasi (juta Rp)", min_value=10.0,
+                value=max(10.0, float(meta.get("rab_awal", meta.get("budget", 300.0)))),
+                step=10.0, key=f"rab_awal_{meta['id']}",
+            )
+            budget_input = st.number_input(
+                "Budget approved (juta Rp)", min_value=10.0,
+                value=max(10.0, float(meta.get("budget", 300.0))),
+                step=10.0, key=f"budget_tender_{meta['id']}",
+            )
+            st.metric("Selisih", format_rupiah(budget_input - rab_awal_input))
+
+            st.markdown("#### Timeline")
+            tgl_aanwijzing = st.date_input("Aanwijzing", datetime(2024, 9, 7), key="td_tgl_aan")
+            tgl_penawaran = st.date_input("Batas penawaran", datetime(2024, 9, 15), key="td_tgl_pen")
+            tgl_kontrak = st.date_input("Target kontrak", datetime(2024, 9, 30), key="td_tgl_kon")
+
+    with sub2:
+        st.markdown("### BOQ — Bill of Quantities")
+
+        if active.get("items_data") is None:
+            active["items_data"] = default_items().to_dict("records")
+
+        with st.expander("📥 Import BOQ dari Excel", expanded=False):
+            if not HAS_OPENPYXL:
+                st.warning("Library 'openpyxl' belum terpasang, jadi import Excel (.xlsx) dinonaktifkan. "
+                           "Gunakan CSV, atau tambahkan 'openpyxl' ke requirements.txt lalu redeploy.")
+            c_up, c_tpl = st.columns([3, 1])
+            with c_tpl:
+                tpl_data, tpl_name, tpl_mime = boq_template_bytes()
+                st.download_button("Unduh Template", data=tpl_data, file_name=tpl_name,
+                                   mime=tpl_mime, key=f"tpl_boq_{pid}")
+            with c_up:
+                up_types = ["xlsx", "xls", "csv"] if HAS_OPENPYXL else ["csv"]
+                up_file = st.file_uploader(
+                    "Upload file (" + " / ".join("." + t for t in up_types) + ")",
+                    type=up_types, key=f"boq_upload_{pid}_{active['items_ver']}",
+                )
+
+            if up_file is not None:
+                try:
+                    parsed = parse_boq_excel(up_file)
+                    n_vol = sum(1 for it in parsed if it["Volume"])
+                    st.success(f"Terbaca {len(parsed)} baris ({n_vol} item dengan volume). Preview:")
+                    st.dataframe(pd.DataFrame(parsed, columns=BOQ_COLUMNS),
+                                 use_container_width=True, hide_index=True, height=420)
+                    mode = st.radio("Mode impor", ["Ganti semua BOQ", "Tambahkan ke BOQ yang ada"],
+                                    horizontal=True, key=f"boq_mode_{pid}")
+                    if st.button("Terapkan ke BOQ", type="primary", key=f"boq_apply_{pid}"):
+                        if mode == "Ganti semua BOQ":
+                            new_items = [dict(it) for it in parsed]
+                        else:
+                            new_items = list(active["items_data"]) + [dict(it) for it in parsed]
+                        active["items_data"] = new_items
+                        active["items_ver"] += 1
+                        rerun()
+                except Exception as e:
+                    st.error(f"Gagal membaca file: {e}")
+
+        st.caption(
+            "📝 **Tabel ini bisa diedit langsung** — tambah baris, hapus, ubah nama item, "
+            "volume, satuan, dan spesifikasi. Isi tabel mengikuti file Excel BOQ apa adanya."
+        )
+
+        active["items_data"] = _normalize_items(active["items_data"])
+        items_df = pd.DataFrame(active["items_data"], columns=BOQ_COLUMNS)
+        items_edited = st.data_editor(
+            items_df, use_container_width=True, hide_index=True, num_rows="dynamic",
+            height=560, key=f"items_editor_{pid}_{active['items_ver']}",
+            column_config={
+                "No": st.column_config.TextColumn("NO", width="small"),
+                "Description": st.column_config.TextColumn("DESCRIPTION", required=True, width="large"),
+                "Specification": st.column_config.TextColumn("SPESIFICATION", width="medium"),
+                "Volume": st.column_config.TextColumn("VOLUME", width="small"),
+                "Unit": st.column_config.TextColumn("UNIT", width="small"),
+                "Unit Price (Rp)": st.column_config.TextColumn("UNIT PRICE (Rp.)", width="small"),
+                "Total Price (Rp)": st.column_config.TextColumn("TOTAL PRICE (Rp.)", width="small"),
+            },
+        )
+        active["items_data"] = _normalize_items(items_edited.to_dict("records"))
+        st.caption(f"Total baris: **{len(items_edited)}**")
+
+    dokumen_lengkap = all([doc_drawing, doc_rks, doc_spek, doc_boq, doc_k3])
+    catatan_lengkap = len(catatan.strip()) >= 10
+    timeline_valid = tgl_aanwijzing < tgl_penawaran < tgl_kontrak
+    items_ok = bool(active.get("items_data")) and len(active["items_data"]) > 0
+    form_valid = dokumen_lengkap and catatan_lengkap and timeline_valid and items_ok
+
+    if not form_valid:
+        missing = []
+        if not dokumen_lengkap:
+            missing.append("semua dokumen wajib dicentang")
+        if not catatan_lengkap:
+            missing.append("catatan minimal 10 karakter")
+        if not timeline_valid:
+            missing.append("urutan tanggal tidak valid")
+        if not items_ok:
+            missing.append("BOQ minimal 1 item")
+        st.warning("Belum lengkap — " + "; ".join(missing))
+
+    if st.button("Simpan Data Tender & BOQ", type="primary", key="btn_save_tender"):
+        if not form_valid:
+            st.error("Data belum lengkap.")
+        else:
+            meta["budget"] = float(budget_input)
+            meta["rab_awal"] = float(rab_awal_input)
+            payload = {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "rab_awal": float(rab_awal_input),
+                "budget": float(budget_input),
+                "variance": float(budget_input - rab_awal_input),
+                "dokumen": [d for d, v in [
+                    ("Drawing", doc_drawing), ("RKS", doc_rks),
+                    ("Spesifikasi", doc_spek), ("BoQ", doc_boq), ("K3", doc_k3),
+                ] if v],
+                "timeline": {
+                    "aanwijzing": str(tgl_aanwijzing),
+                    "penawaran": str(tgl_penawaran),
+                    "kontrak": str(tgl_kontrak),
+                },
+                "catatan": catatan,
+                "boq_count": len(active["items_data"]),
+            }
+            live_data["tender"] = payload
+            st.success("Tersimpan. Lanjut ke Vendor Qualification...")
+            next_step()
+            rerun()
+
+    render_nav(show_next=stage_status(active, "tender"), next_label="Lanjut ke Vendor Qualification")
+
+
+# =========================================================
+# STEP 2 — VENDOR QUALIFICATION
+# =========================================================
+elif step == 2:
+    st.markdown("## Tahap 2 — Vendor Qualification & Selection")
+    st.markdown(
+        "<div class='flow-hint'>"
+        "Alur: Vendor diundang (pakai email) → vendor login & isi penawaran sendiri → "
+        "KPDP melihat langsung (realtime) → klarifikasi teknis → optimasi → deal harga & SPK."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    sub1, sub2, sub3, sub4, sub5 = st.tabs([
+        "1. BOQ & Vendor Diundang",
+        "2. Penawaran Masuk (Live)",
+        "3. Appointment Klarifikasi Teknis",
+        "4. Optimasi Setelah Klarifikasi",
+        "5. Deal Harga & SPK",
+    ])
+
+    # ---------- 1. BOQ & VENDOR DIUNDANG ----------
+    with sub1:
+        st.markdown("### Item Pekerjaan (BOQ)")
+        items_data = active.get("items_data", [])
+        if not items_data:
+            st.warning("BOQ belum diisi. Kembali ke Tahap 1.")
+        else:
+            boq_view = pd.DataFrame(_normalize_items(items_data), columns=BOQ_COLUMNS)
+            boq_view.columns = ["NO", "DESCRIPTION", "SPESIFICATION", "VOLUME", "UNIT",
+                                "UNIT PRICE (Rp.)", "TOTAL PRICE (Rp.)"]
+            st.dataframe(boq_view, use_container_width=True, hide_index=True, height=480)
+
+        st.markdown("---")
+        st.markdown("### Vendor yang Diundang")
+        st.caption("Isi **Email** tiap vendor. Vendor login dengan email ini untuk mengisi penawaran. "
+                   "Perubahan daftar ini otomatis tersimpan ke database.")
+
+        active["invited_vendors"] = _norm_invited(active.get("invited_vendors"))
+        if not active["invited_vendors"]:
+            active["invited_vendors"] = [{"Vendor": n, "Email": ""} for n in INVITED_VENDORS]
+
+        with st.expander("📥 Import Vendor dari Excel", expanded=False):
+            if not HAS_OPENPYXL:
+                st.warning("Library 'openpyxl' belum terpasang, jadi import Excel (.xlsx) dinonaktifkan.")
+            cv_up, cv_tpl = st.columns([3, 1])
+            with cv_tpl:
+                vt_data, vt_name, vt_mime = vendor_template_bytes()
+                st.download_button("Unduh Template", data=vt_data, file_name=vt_name,
+                                   mime=vt_mime, key=f"tpl_vendor_{pid}")
+            with cv_up:
+                v_types = ["xlsx", "xls", "csv"] if HAS_OPENPYXL else ["csv"]
+                v_file = st.file_uploader(
+                    "Upload file (" + " / ".join("." + t for t in v_types) + ") — kolom: Vendor, Email",
+                    type=v_types, key=f"vendor_upload_{pid}_{active['invited_ver']}",
+                )
+
+            if v_file is not None:
+                try:
+                    v_parsed = parse_vendor_excel(v_file)
+                    st.success(f"Terbaca {len(v_parsed)} vendor. Preview:")
+                    st.dataframe(pd.DataFrame(v_parsed), use_container_width=True, hide_index=True)
+                    v_mode = st.radio("Mode impor",
+                                      ["Ganti semua vendor", "Tambahkan ke daftar yang ada"],
+                                      horizontal=True, key=f"vendor_mode_{pid}")
+                    if st.button("Terapkan ke Daftar Vendor", type="primary", key=f"vendor_apply_{pid}"):
+                        if v_mode == "Ganti semua vendor":
+                            new_list = list(v_parsed)
+                        else:
+                            new_list = list(active["invited_vendors"])
+                            existing = {x["Vendor"].lower() for x in new_list}
+                            for nm in v_parsed:
+                                if nm["Vendor"].lower() not in existing:
+                                    new_list.append(nm)
+                        active["invited_vendors"] = new_list
+                        active["invited_ver"] += 1
+                        rerun()
+                except Exception as e:
+                    st.error(f"Gagal membaca file: {e}")
+
+        invited_df = pd.DataFrame(active["invited_vendors"], columns=["Vendor", "Email"])
+        invited_edited = st.data_editor(
+            invited_df, use_container_width=True, hide_index=True, num_rows="dynamic",
+            key=f"invited_{pid}_{active['invited_ver']}",
+            column_config={
+                "Vendor": st.column_config.TextColumn("Vendor", required=True),
+                "Email": st.column_config.TextColumn("Email login vendor"),
+            },
+        )
+        active["invited_vendors"] = _norm_invited(invited_edited.to_dict("records"))
+
+    invited = active.get("invited_vendors", [])
+    invited_names = [v["Vendor"] for v in invited]
+
+    # ---------- 2. PENAWARAN MASUK (LIVE) ----------
+    with sub2:
+        st.markdown("### Penawaran Masuk dari Vendor")
+        st.caption("Tabel ini **update otomatis tiap 3 detik** saat vendor mengirim / mengubah penawaran "
+                   "dari portal vendor. Tidak perlu refresh halaman.")
+        if not invited:
+            st.warning("Belum ada vendor diundang.")
+        else:
+            save_project(pid)  # pastikan undangan vendor sudah di database
+            live_penawaran(pid, invited, deadline)
+
+    # ---------- 3. APPOINTMENT ----------
+    with sub3:
+        st.markdown("### Appointment Klarifikasi Teknis")
+        if not invited:
+            st.warning("Belum ada vendor.")
+        else:
+            with st.expander("➕ Buat Appointment", expanded=True):
+                c1, c2 = st.columns(2)
+                with c1:
+                    appt_vendor = st.selectbox("Vendor", options=invited_names, key=f"apv_{pid}")
+                    appt_mode = st.radio("Mode", ["Tatap muka (Kantor)", "Tatap muka (On-site)", "Zoom Meeting"], key=f"apm_{pid}")
+                    appt_date = st.date_input("Tanggal", date.today(), key=f"apd_{pid}")
+                    appt_time = st.time_input("Jam", time(9, 0), key=f"apt_{pid}")
+                    appt_duration = st.number_input("Durasi (menit)", 30, 480, 90, 15, key=f"apdur_{pid}")
+                with c2:
+                    appt_location = st.text_input("Lokasi / Link Zoom", placeholder="Meeting Room A", key=f"apl_{pid}")
+                    appt_participants = st.text_area("Peserta kami", height=80, key=f"app_{pid}")
+                    appt_vendor_participants = st.text_area("Peserta vendor", height=80, key=f"apvp_{pid}")
+                    appt_agenda = st.text_area("Agenda", placeholder="Klarifikasi WPS, NDT...", height=100, key=f"apa_{pid}")
+
+                if st.button("Simpan Appointment", type="primary", key=f"btna_{pid}"):
+                    if not appt_location.strip():
+                        st.error("Lokasi wajib diisi.")
+                    elif len(appt_agenda.strip()) < 10:
+                        st.error("Agenda minimal 10 karakter.")
+                    else:
+                        v_email = next((v["Email"] for v in invited if v["Vendor"] == appt_vendor), "")
+                        try:
+                            db().table("appointments").insert({
+                                "id": str(uuid.uuid4())[:6], "project_id": pid,
+                                "vendor": appt_vendor, "vendor_email": v_email.lower(),
+                                "mode": appt_mode, "date": str(appt_date), "time": str(appt_time),
+                                "duration": int(appt_duration), "location": appt_location,
+                                "participants": appt_participants,
+                                "vendor_participants": appt_vendor_participants,
+                                "agenda": appt_agenda, "status": "Terjadwal", "hasil": "",
+                                "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            }).execute()
+                            st.success("Appointment dibuat.")
+                            rerun()
+                        except Exception as e:
+                            st.error(f"Gagal menyimpan appointment: {e}")
+
+            st.markdown("---")
+            appointments = fetch_appointments(pid)
+            if not appointments:
+                st.info("Belum ada appointment.")
+            else:
+                status_options = ["Terjadwal", "Berlangsung", "Selesai", "Dibatalkan"]
+                for i, appt in enumerate(appointments):
+                    with st.expander(
+                        f"[{appt['status']}] {appt['vendor']} · {appt['mode']} · {appt['date']} {appt['time']}",
+                        expanded=(i == 0),
+                    ):
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            st.markdown(f"**Vendor:** {appt['vendor']}")
+                            st.markdown(f"**Mode:** {appt['mode']}")
+                            st.markdown(f"**Waktu:** {appt['date']} · {appt['time']} ({appt['duration']} menit)")
+                            st.markdown(f"**Lokasi:** {appt['location']}")
+                        with c2:
+                            st.markdown(f"**Peserta kami:** {appt['participants'] or '-'}")
+                            st.markdown(f"**Peserta vendor:** {appt['vendor_participants'] or '-'}")
+                            st.markdown(f"**Agenda:** {appt['agenda']}")
+                        st.markdown("---")
+                        cur_status = appt["status"] if appt["status"] in status_options else "Terjadwal"
+                        new_status = st.selectbox("Status", status_options,
+                                                  index=status_options.index(cur_status),
+                                                  key=f"as_{appt['id']}")
+                        hasil = st.text_area("Hasil klarifikasi", value=appt.get("hasil") or "",
+                                             height=120, key=f"ah_{appt['id']}")
+                        cs, cd = st.columns([3, 1])
+                        with cs:
+                            if st.button("Simpan", key=f"sv_{appt['id']}"):
+                                try:
+                                    db().table("appointments").update(
+                                        {"status": new_status, "hasil": hasil}
+                                    ).eq("id", appt["id"]).execute()
+                                    st.success("Tersimpan.")
+                                    rerun()
+                                except Exception as e:
+                                    st.error(f"Gagal menyimpan: {e}")
+                        with cd:
+                            if st.button("Hapus", key=f"dl_{appt['id']}"):
+                                try:
+                                    db().table("appointments").delete().eq("id", appt["id"]).execute()
+                                    rerun()
+                                except Exception as e:
+                                    st.error(f"Gagal menghapus: {e}")
+
+    # ---------- data penawaran untuk optimasi & SPK ----------
+    pen_now = fetch_penawaran(pid)
+    harga, durasi_map = {}, {}
+    for v in invited:
+        r = pen_now.get(v["Email"].lower()) if v["Email"] else None
+        harga[v["Vendor"]] = float(r["harga_rab"]) if r else 0.0
+        durasi_map[v["Vendor"]] = int(deadline) if r else 0
+
+    # ---------- 4. OPTIMASI ----------
+    with sub4:
+        st.markdown("### Optimasi Setelah Klarifikasi")
+        n_appt = len(fetch_appointments(pid))
+
+        prasyarat = []
+        if not invited:
+            prasyarat.append("vendor diundang")
+        if not any(h > 0 for h in harga.values()):
+            prasyarat.append("penawaran harga vendor")
+        if n_appt == 0:
+            prasyarat.append("appointment klarifikasi")
+
+        if prasyarat:
+            st.warning("Belum bisa optimasi. Selesaikan: " + ", ".join(prasyarat))
+        else:
+            st.caption("Optimasi memilih vendor dengan **penawaran harga terendah** yang masih dalam budget.")
+
+            st.markdown("#### Data untuk Optimasi (Ranking Penawaran)")
+            live_ranking(pid, invited, budget, deadline)
+
+            eligible = [n for n in invited_names if harga[n] > 0 and harga[n] <= budget]
+
+            if not eligible:
+                st.error("Tidak ada vendor yang lolos kriteria.")
+            else:
+                cc1, cc2 = st.columns(2)
+                cc1.metric("Budget", format_rupiah(budget))
+                cc2.metric("Vendor lolos budget", f"{len(eligible)} dari {len(invited)}")
+
+                st.markdown("---")
+                selected_name, solver_status = solve_vendor_lp(
+                    eligible, {n: harga[n] for n in eligible}, budget, None, 1.0, 0.0
+                )
+
+                if selected_name is None:
+                    st.error(f"Optimasi gagal: {solver_status}")
+                else:
+                    selected_cost = harga[selected_name]
+                    selected_duration = durasi_map.get(selected_name, 0)
+
+                    st.success(f"**Vendor terbaik: {selected_name}**")
+                    r1, r2, r3, r4 = st.columns(4)
+                    r1.metric("Vendor", selected_name)
+                    r2.metric("Harga Penawaran", format_rupiah(selected_cost))
+                    r3.metric("Durasi", f"{selected_duration} hari")
+                    r4.metric("Sisa budget", format_rupiah(budget - selected_cost))
+
+                    st.session_state[f"optimized_vendor_{pid}"] = selected_name
+                    st.session_state[f"optimized_cost_{pid}"] = selected_cost
+
+    # ---------- 5. DEAL & SPK ----------
+    with sub5:
+        st.markdown("### Deal Harga & SPK")
+        optimized_vendor = st.session_state.get(f"optimized_vendor_{pid}")
+        optimized_cost = st.session_state.get(f"optimized_cost_{pid}", 0)
+
+        if not optimized_vendor:
+            st.warning("Selesaikan optimasi dulu (sub-tab 4).")
+        else:
+            st.markdown(
+                f"<div class='hint-box'><b>Vendor:</b> {html.escape(str(optimized_vendor))}<br>"
+                f"<b>Harga penawaran awal:</b> {format_rupiah(optimized_cost)}</div>",
+                unsafe_allow_html=True,
+            )
+
+            c1, c2 = st.columns(2)
+            with c1:
+                final_price = st.number_input(
+                    "Harga kesepakatan (juta Rp)", min_value=1.0,
+                    value=max(1.0, float(optimized_cost)), step=5.0, key=f"fp_{pid}",
+                )
+            with c2:
+                saving = optimized_cost - final_price
+                st.metric("Penghematan", format_rupiah(saving))
+
+            st.markdown("#### SPK")
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                spk_number = st.text_input("Nomor SPK", placeholder="SPK/KPOP/2024/001", key=f"spkn_{pid}")
+            with c2:
+                spk_date = st.date_input("Tanggal SPK", date.today(), key=f"spkd_{pid}")
+            with c3:
+                spk_signer = st.text_input("Ditandatangani oleh", placeholder="Nama PM", key=f"spks_{pid}")
+
+            approval_drawing = st.radio(
+                "Status Approval Drawing Vendor",
+                ["Belum", "Diajukan", "Disetujui", "Revisi"], index=0, key=f"vsa_{pid}",
+            )
+            negosiasi_notes = st.text_area("Catatan Negosiasi", height=100, key=f"ngn_{pid}")
+
+            valid = bool(
+                spk_number and len(spk_number.strip()) >= 5
+                and spk_signer and len(spk_signer.strip()) >= 3
+                and approval_drawing == "Disetujui"
+                and final_price > 0
+            )
+
+            if not valid:
+                missing = []
+                if not (spk_number and len(spk_number.strip()) >= 5):
+                    missing.append("nomor SPK min 5 karakter")
+                if not (spk_signer and len(spk_signer.strip()) >= 3):
+                    missing.append("penandatangan SPK")
+                if approval_drawing != "Disetujui":
+                    missing.append("approval drawing 'Disetujui'")
+                st.warning("Belum lengkap — " + "; ".join(missing))
+
+            if st.button("Simpan Keputusan & SPK", type="primary", key="btn_vs"):
+                if not valid:
+                    st.error("Data belum lengkap.")
+                else:
+                    sel_email = next((v["Email"] for v in invited if v["Vendor"] == optimized_vendor), "")
+                    payload = {
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "selected_vendor": optimized_vendor,
+                        "selected_vendor_email": sel_email,
+                        "rab_awal_vendor": float(optimized_cost),
+                        "selected_cost": float(final_price),
+                        "saving": float(saving),
+                        "selected_duration": int(durasi_map.get(optimized_vendor, 0)),
+                        "spk_number": spk_number,
+                        "spk_date": str(spk_date),
+                        "spk_signer": spk_signer,
+                        "approval_drawing": approval_drawing,
+                        "negosiasi_notes": negosiasi_notes,
+                        "appointment_count": len(fetch_appointments(pid)),
+                        "invited_vendors": len(invited),
+                    }
+                    live_data["vendor_selection"] = payload
+                    st.success("Keputusan & SPK tersimpan. Lanjut ke Site Execution...")
+                    next_step()
+                    rerun()
+
+    render_nav(show_next=stage_status(active, "vendor_selection"), next_label="Lanjut ke Site Execution")
+
+
+# =========================================================
+# STEP 3 — SITE EXECUTION (S-CURVE TABEL + GRAFIK)
+# =========================================================
+elif step == 3:
+    st.markdown("## Tahap 3 — Site Execution")
+    st.markdown(
+        "<div class='flow-hint'>"
+        "Isi tabel WBS item pekerjaan — tiap item punya harga, bobot, dan rentang minggu. "
+        "Sistem akan hitung distribusi bobot per minggu, total per minggu, dan progress kumulatif "
+        "dalam format tabel seperti Excel, plus grafik S-Curve."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    vs = live_data.get("vendor_selection", {})
+    selected_vendor = vs.get("selected_vendor", "-")
+    final_cost = vs.get("selected_cost", 0)
+
+    st.caption(f"Kontraktor: {selected_vendor} · Nilai kontrak: {format_rupiah(final_cost)}")
+
+    st.markdown("### S-Curve dari Vendor")
+    sel_email_v = vs.get("selected_vendor_email", "")
+    sc_sub = fetch_scurve(pid, sel_email_v) if sel_email_v else None
+    if not sel_email_v:
+        st.info("Email vendor terpilih belum tersimpan, jadi S-Curve vendor tidak bisa dicari.")
+    elif not sc_sub:
+        st.warning("Vendor terpilih belum mengupload S-Curve.")
+    else:
+        sc_data = sc_sub.get("data") or []
+        total_sc = float(sc_sub.get("total_harga") or 0)
+        st.success(f"S-Curve sudah diupload {fmt_ts(sc_sub.get('uploaded_at'))} · "
+                   f"file {sc_sub.get('filename') or '-'} · {len(sc_data)} item · "
+                   f"total {format_rupiah(total_sc)}")
+        if final_cost and abs(total_sc - float(final_cost)) > 0.005 * float(final_cost):
+            st.warning(f"Total S-Curve vendor ({format_rupiah(total_sc)}) berbeda dari "
+                       f"nilai kontrak ({format_rupiah(final_cost)}).")
+        with st.expander("Lihat S-Curve dari vendor"):
+            st.dataframe(pd.DataFrame(sc_data), use_container_width=True, hide_index=True)
+        if st.button("Pakai S-Curve Vendor sebagai WBS", key=f"use_sc_{pid}"):
+            active["wbs_data"] = [{
+                "No": r.get("No", ""),
+                "Item Pekerjaan": r.get("Uraian Pekerjaan", ""),
+                "Harga (juta Rp)": float(r.get("Harga (juta Rp)") or 0),
+                "Mulai": int(r.get("Mulai (Minggu)") or 1),
+                "Selesai": int(r.get("Selesai (Minggu)") or 1),
+                "Realisasi (%)": 0.0,
+            } for r in sc_data]
+            active["wbs_ver"] = int(active.get("wbs_ver", 0)) + 1
+            rerun()
+
+    st.markdown("### Tabel Rencana Kerja (WBS)")
+
+    if active.get("wbs_data") is None:
+        active["wbs_data"] = default_wbs().to_dict("records")
+
+    wbs_df = pd.DataFrame(active["wbs_data"], columns=WBS_COLUMNS)
+    wbs_raw = st.data_editor(
+        wbs_df, use_container_width=True, hide_index=True, num_rows="dynamic",
+        key=f"wbs_editor_{pid}_{active.get('wbs_ver', 0)}",
+        column_config={
+            "No": st.column_config.TextColumn("No", width="small", help="Nomor/abjad urut (A, B, C atau 1, 2, 3)"),
+            "Item Pekerjaan": st.column_config.TextColumn("Uraian Pekerjaan", required=True, width="large"),
+            "Harga (juta Rp)": st.column_config.NumberColumn("Harga (juta Rp)", min_value=0.0, step=1.0, format="%.1f"),
+            "Mulai": st.column_config.NumberColumn("Mulai (M)", min_value=1, step=1, width="small"),
+            "Selesai": st.column_config.NumberColumn("Selesai (M)", min_value=1, step=1, width="small"),
+            "Realisasi (%)": st.column_config.NumberColumn("Real. (%)", min_value=0.0, max_value=100.0, step=1.0, format="%.1f"),
+        },
+    )
+    active["wbs_data"] = json.loads(wbs_raw.to_json(orient="records"))
+
+    wbs_edited = wbs_raw.copy()
+    wbs_edited["Item Pekerjaan"] = wbs_edited["Item Pekerjaan"].fillna("").astype(str).str.strip()
+    wbs_edited = wbs_edited[wbs_edited["Item Pekerjaan"] != ""].copy()
+    wbs_edited["No"] = wbs_edited["No"].fillna("").astype(str)
+    wbs_edited["Harga (juta Rp)"] = pd.to_numeric(
+        wbs_edited["Harga (juta Rp)"], errors="coerce").fillna(0.0).clip(lower=0.0)
+    wbs_edited["Realisasi (%)"] = pd.to_numeric(
+        wbs_edited["Realisasi (%)"], errors="coerce").fillna(0.0).clip(lower=0.0, upper=100.0)
+    wbs_edited["Mulai"] = pd.to_numeric(
+        wbs_edited["Mulai"], errors="coerce").fillna(1).clip(lower=1).astype(int)
+    wbs_edited["Selesai"] = pd.to_numeric(
+        wbs_edited["Selesai"], errors="coerce").fillna(1).clip(lower=1).astype(int)
+    wbs_edited["Selesai"] = np.maximum(wbs_edited["Selesai"].values, wbs_edited["Mulai"].values)
+    wbs_edited = wbs_edited.reset_index(drop=True)
+
+    if wbs_edited.empty:
+        st.warning("Tabel WBS kosong.")
+        render_nav(show_next=False)
+        stop_app()
+
+    total_harga = float(wbs_edited["Harga (juta Rp)"].sum())
+    if total_harga > 0:
+        wbs_edited["Bobot (%)"] = (wbs_edited["Harga (juta Rp)"] / total_harga * 100).round(2)
+    else:
+        wbs_edited["Bobot (%)"] = 0.0
+
+    max_week = int(wbs_edited["Selesai"].max())
+    weeks = list(range(1, max_week + 1))
+
+    distrib_matrix = []
+    for _, row in wbs_edited.iterrows():
+        w_start = int(row["Mulai"])
+        w_end = int(row["Selesai"])
+        bobot = float(row["Bobot (%)"])
+        span = w_end - w_start + 1
+
+        week_vals = [0.0] * max_week
+        if span > 0 and bobot > 0:
+            ts = np.linspace(0, 1, span + 1)
+            s_vals = np.array([sigmoid_kernel(t, k=4.0) for t in ts])
+            weekly = np.diff(s_vals) * bobot
+            if weekly.sum() > 0:
+                weekly = weekly / weekly.sum() * bobot
+            for i, w in enumerate(range(w_start, w_end + 1)):
+                week_vals[w - 1] = round(float(weekly[i]), 2)
+        distrib_matrix.append(week_vals)
+
+    total_per_week = np.sum(distrib_matrix, axis=0).round(2)
+    cum_plan = np.cumsum(total_per_week).round(2)
+
+    current_week = st.number_input(
+        "Minggu saat ini (untuk realisasi)", min_value=1, max_value=max_week,
+        value=min(max_week, max(1, int(max_week * 0.6))), step=1, key=f"current_week_{pid}",
+    )
+    current_week = int(current_week)
+
+    distrib_actual = []
+    for _, row in wbs_edited.iterrows():
+        w_start = int(row["Mulai"])
+        w_end = int(row["Selesai"])
+        bobot = float(row["Bobot (%)"])
+        realisasi_pct = float(row["Realisasi (%)"])
+        span = w_end - w_start + 1
+
+        week_vals = [0.0] * max_week
+        if span > 0 and bobot > 0 and realisasi_pct > 0:
+            ts = np.linspace(0, 1, span + 1)
+            s_vals = np.array([sigmoid_kernel(t, k=4.0) for t in ts])
+            weekly_plan = np.diff(s_vals) * bobot
+            if weekly_plan.sum() > 0:
+                weekly_plan = weekly_plan / weekly_plan.sum() * bobot
+            weekly_actual_full = weekly_plan * (realisasi_pct / 100.0)
+            w_cut = min(current_week, w_end)
+            if w_cut >= w_start:
+                for i, w in enumerate(range(w_start, w_cut + 1)):
+                    week_vals[w - 1] = round(float(weekly_actual_full[i]), 2)
+        distrib_actual.append(week_vals)
+
+    total_actual_per_week = np.sum(distrib_actual, axis=0).round(2)
+    cum_actual = np.cumsum(total_actual_per_week).round(2)
+
+    st.markdown("### Tabel S-Curve Mingguan")
+
+    header_cells = (
+        "<th style='text-align:left;'>No</th>"
+        "<th style='text-align:left;'>Uraian Pekerjaan</th>"
+        "<th>Harga</th><th>Bobot</th>"
+    )
+    for w in weeks:
+        header_cells += f"<th>M{w}</th>"
+
+    body_rows = ""
+    for i, row in wbs_edited.iterrows():
+        body_rows += "<tr>"
+        body_rows += f"<td class='text-left'>{html.escape(str(row['No']))}</td>"
+        body_rows += f"<td class='text-left'>{html.escape(str(row['Item Pekerjaan']))}</td>"
+        body_rows += f"<td>Rp {row['Harga (juta Rp)']:,.0f}</td>"
+        body_rows += f"<td>{row['Bobot (%)']:.2f}%</td>"
+        for w_idx in range(max_week):
+            val = distrib_matrix[i][w_idx]
+            body_rows += f"<td>{val:.2f}%</td>" if val > 0 else "<td>-</td>"
+        body_rows += "</tr>"
+
+    body_rows += "<tr class='total-row'><td class='text-left'></td><td class='text-left'>Total</td>"
+    body_rows += f"<td>Rp {total_harga:,.0f}</td>"
+    body_rows += "<td>100.00%</td>" if total_harga > 0 else "<td>0.00%</td>"
+    for val in total_per_week:
+        body_rows += f"<td>{val:.2f}%</td>" if val > 0 else "<td>-</td>"
+    body_rows += "</tr>"
+
+    body_rows += "<tr class='cum-row'><td class='text-left'></td><td class='text-left'>Progress Rencana Kumulatif</td><td></td><td></td>"
+    for val in cum_plan:
+        body_rows += f"<td>{val:.2f}%</td>"
+    body_rows += "</tr>"
+
+    body_rows += "<tr><td class='text-left'></td><td class='text-left'>Total Realisasi per Minggu</td><td></td><td></td>"
+    for val in total_actual_per_week:
+        body_rows += f"<td>{val:.2f}%</td>" if val > 0 else "<td>-</td>"
+    body_rows += "</tr>"
+
+    body_rows += "<tr class='actual-cum-row'><td class='text-left'></td><td class='text-left'>Progress Realisasi Kumulatif</td><td></td><td></td>"
+    for val in cum_actual:
+        body_rows += f"<td>{val:.2f}%</td>"
+    body_rows += "</tr>"
+
+    table_html = f"""
+    <div style='overflow-x:auto;'>
+        <table class='sc-table'>
+            <thead><tr>{header_cells}</tr></thead>
+            <tbody>{body_rows}</tbody>
+        </table>
+    </div>
+    """
+    st.markdown(table_html, unsafe_allow_html=True)
+
+    st.markdown("### Grafik S-Curve")
+
+    fig, ax = plt.subplots(figsize=(13, 5.5))
+    ax.fill_between(weeks, cum_plan, cum_actual, where=(cum_actual < cum_plan),
+                    color="#dc2626", alpha=0.12, label="Deviasi negatif")
+    ax.fill_between(weeks, cum_plan, cum_actual, where=(cum_actual >= cum_plan),
+                    color="#047857", alpha=0.12, label="Deviasi positif")
+    ax.plot(weeks, cum_plan, color="#1e40af", linewidth=2.5, marker="o", markersize=6, label="Rencana (S-Curve)")
+    ax.plot(weeks, cum_actual, color="#dc2626", linewidth=2.5, marker="s", markersize=6, label="Realisasi")
+    ax.axvline(current_week, linestyle=":", color="#6b7280", linewidth=1.5, label=f"Minggu ini (M{current_week})")
+
+    plan_now = float(cum_plan[current_week - 1])
+    actual_now = float(cum_actual[current_week - 1])
+
+    ax.scatter([current_week], [plan_now], color="#1e40af", s=100, zorder=5, edgecolor="white", linewidth=2)
+    ax.scatter([current_week], [actual_now], color="#dc2626", s=100, marker="D", zorder=5, edgecolor="white", linewidth=2)
+    ax.annotate(f"Rencana: {plan_now:.2f}%", xy=(current_week, plan_now), xytext=(10, 10),
+                textcoords="offset points", color="#1e40af", fontsize=9, fontweight="600")
+    ax.annotate(f"Realisasi: {actual_now:.2f}%", xy=(current_week, actual_now), xytext=(10, -20),
+                textcoords="offset points", color="#dc2626", fontsize=9, fontweight="600")
+
+    ax.set_xlabel("Minggu ke-", fontsize=10)
+    ax.set_ylabel("Progress Kumulatif (%)", fontsize=10)
+    ax.set_title(f"S-Curve — {selected_vendor}", fontsize=12, fontweight="600")
+    ax.set_ylim(0, 105)
+    ax.set_xlim(1, max(max_week, 2))
+    ax.set_xticks(weeks)
+    ax.tick_params(labelsize=9)
+    ax.legend(fontsize=9, loc="lower right")
+    ax.grid(alpha=0.25)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    st.pyplot(fig)
+    plt.close(fig)
+
+    deviasi = actual_now - plan_now
+    spi = actual_now / plan_now if plan_now > 0 else 0.0
+
+    sc1, sc2, sc3, sc4 = st.columns(4)
+    sc1.metric(f"Rencana (M{current_week})", f"{plan_now:.2f}%")
+    sc2.metric(f"Realisasi (M{current_week})", f"{actual_now:.2f}%")
+    sc3.metric("Deviasi", f"{deviasi:+.2f}%")
+    sc4.metric("SPI", f"{spi:.3f}")
+
+    if deviasi < -5:
+        st.error(f"Deviasi {deviasi:.2f}% — berpotensi terlambat.")
+    elif deviasi < 0:
+        st.warning(f"Deviasi {deviasi:.2f}% — perlu perhatian.")
+    else:
+        st.success(f"Progress sesuai/lebih cepat {deviasi:+.2f}%.")
+
+    with st.expander("Unduh Data S-Curve"):
+        cols = ["No", "Uraian Pekerjaan", "Harga (juta Rp)", "Bobot (%)"] + [f"M{w}" for w in weeks]
+        rows_export = []
+        for i, row in wbs_edited.iterrows():
+            r = [row["No"], row["Item Pekerjaan"], row["Harga (juta Rp)"], row["Bobot (%)"]]
+            r += distrib_matrix[i]
+            rows_export.append(r)
+        rows_export.append(["", "Total", total_harga, 100.00 if total_harga > 0 else 0.0] + list(total_per_week))
+        rows_export.append(["", "Progress Rencana Kumulatif", "", ""] + list(cum_plan))
+        rows_export.append(["", "Total Realisasi per Minggu", "", ""] + list(total_actual_per_week))
+        rows_export.append(["", "Progress Realisasi Kumulatif", "", ""] + list(cum_actual))
+
+        df_export = pd.DataFrame(rows_export, columns=cols)
+        st.dataframe(df_export, use_container_width=True, hide_index=True)
+        st.download_button(
+            "Unduh S-Curve (CSV)",
+            data=df_export.to_csv(index=False).encode("utf-8-sig"),
+            file_name=f"s_curve_{meta['name'].replace(' ', '_')}.csv",
+            mime="text/csv",
+        )
+
+    st.markdown("---")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("#### Pre Construction Meeting")
+        pcm_date = st.date_input("Tanggal PCM", datetime(2024, 10, 1), key="se_pcm_date")
+        pcm_notes = st.text_area("Catatan PCM", placeholder="Minimal 10 karakter...", height=100, key="se_pcm_notes")
+    with col2:
+        st.markdown("#### Analisa Kendala")
+        kendala = st.selectbox(
+            "Kendala utama",
+            ["Pilih kendala...", "Tidak ada", "Perubahan desain",
+             "Keterlambatan material", "Cuaca ekstrem", "Akses terbatas"],
+            key="se_kendala",
+        )
+        if kendala == "Tidak ada":
+            st.info("Tidak ada kendala.")
+            aksi = "Tidak diperlukan"
+            aksi_valid = True
+        elif kendala == "Pilih kendala...":
+            aksi = None
+            aksi_valid = False
+        else:
+            aksi = st.radio("Langkah penanganan", [
+                "Pilih aksi...", "Evaluasi dengan klien", "Revisi gambar kerja",
+                "Pengukuran ulang aktual", "Konsultasi GSB & GSJ",
+            ], key="se_aksi")
+            aksi_valid = aksi != "Pilih aksi..."
+        kpi = st.slider("KPI kontraktor (%)", 0, 100, 0, key="se_kpi")
+
+    pcm_valid = len(pcm_notes.strip()) >= 10
+    kendala_valid = kendala != "Pilih kendala..."
+    kpi_valid = kpi > 0
+    form_valid = pcm_valid and kendala_valid and aksi_valid and kpi_valid
+
+    if not form_valid:
+        missing = []
+        if not pcm_valid:
+            missing.append("catatan PCM min 10 karakter")
+        if not kendala_valid:
+            missing.append("kendala belum dipilih")
+        if not aksi_valid:
+            missing.append("aksi belum dipilih")
+        if not kpi_valid:
+            missing.append("KPI harus > 0%")
+        st.warning("Belum lengkap — " + "; ".join(missing))
+
+    if st.button("Simpan Data Site Execution", type="primary", key="btn_se"):
+        if not form_valid:
+            st.error("Data belum lengkap.")
+        else:
+            payload = {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "vendor": selected_vendor,
+                "current_week": current_week,
+                "plan_pct": float(plan_now),
+                "actual_pct": float(actual_now),
+                "deviation_pct": float(deviasi),
+                "spi": float(spi),
+                "pcm_date": str(pcm_date),
+                "pcm_notes": pcm_notes,
+                "kendala": kendala,
+                "aksi": aksi,
+                "kpi": kpi,
+                "wbs_count": len(wbs_edited),
+            }
+            live_data["site_execution"] = payload
+            st.success("Site Execution tersimpan. Lanjut ke Quality Control...")
+            next_step()
+            rerun()
+
+    render_nav(show_next=stage_status(active, "site_execution"), next_label="Lanjut ke Quality Control")
+
+
+# =========================================================
+# STEP 4 — QUALITY CONTROL
+# =========================================================
+elif step == 4:
+    st.markdown("## Tahap 4 — Quality Control & Handover")
+    st.markdown(
+        "<div class='flow-hint'>"
+        "Alur: Pemberitahuan selesai → Inspeksi → Commissioning → BAST → Selesai."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    live = live_data.get("quality_control", {})
+    if live:
+        c1, c2 = st.columns(2)
+        c1.metric("Status akhir", live.get("final_status", "-"))
+        c2.metric("BAST", live.get("bast_number", "-") or "-")
+        st.caption(f"Terakhir disimpan: {live.get('timestamp', '-')}")
+        st.markdown("---")
+
+    st.markdown("#### Inspeksi Mutu")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        mat_insp = st.selectbox("Material", ["Pilih...", "PASS", "FAIL"], key="qc_mat")
+    with c2:
+        ndt = st.selectbox("NDT / Weld", ["Pilih...", "PASS", "FAIL"], key="qc_ndt")
+    with c3:
+        hydro = st.selectbox("Hydrotest", ["Pilih...", "PASS", "FAIL"], key="qc_hydro")
+    with c4:
+        visual = st.selectbox("Visual", ["Pilih...", "PASS", "FAIL"], key="qc_visual")
+
+    st.markdown("#### Inspeksi Akhir")
+    final_status = st.radio("Sesuai kontrak?", ["Pilih...", "Ya", "Tidak"], index=0, key="qc_final")
+
+    if final_status == "Ya":
+        st.markdown("#### BAST")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            bast_date = st.date_input("Tanggal BAST", datetime(2024, 12, 20), key="qc_bd")
+        with c2:
+            bast_number = st.text_input("Nomor BAST", placeholder="BAST/KPOP/2024/047", key="qc_bn")
+        with c3:
+            approved_by = st.text_input("Disetujui oleh", placeholder="Nama lengkap", key="qc_ab")
+        bast_notes = st.text_area("Catatan BAST", placeholder="Minimal 10 karakter...", height=80, key="qc_bnotes")
+    else:
+        bast_date = None
+        bast_number = ""
+        approved_by = ""
+        bast_notes = ""
+
+    inspeksi_valid = all(x in ["PASS", "FAIL"] for x in [mat_insp, ndt, hydro, visual])
+    status_valid = final_status in ["Ya", "Tidak"]
+
+    if status_valid and final_status == "Ya":
+        bast_valid = bool(
+            bast_number and len(bast_number.strip()) >= 5
+            and approved_by and len(approved_by.strip()) >= 3
+            and bast_notes and len(bast_notes.strip()) >= 10
+        )
+    else:
+        bast_valid = True
+
+    form_valid = inspeksi_valid and status_valid and bast_valid
+
+    if not form_valid:
+        missing = []
+        if not inspeksi_valid:
+            missing.append("semua inspeksi wajib dipilih")
+        if not status_valid:
+            missing.append("status akhir belum dipilih")
+        if not bast_valid:
+            missing.append("data BAST belum lengkap")
+        st.warning("Belum lengkap — " + "; ".join(missing))
+
+    if st.button("Simpan Data Quality Control", type="primary", key="btn_qc"):
+        if not form_valid:
+            st.error("Data belum lengkap.")
+        else:
+            payload = {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "material_inspection": mat_insp, "ndt": ndt, "hydrotest": hydro,
+                "visual": visual, "final_status": final_status,
+                "bast_date": str(bast_date) if bast_date else None,
+                "bast_number": bast_number, "approved_by": approved_by,
+                "bast_notes": bast_notes,
+            }
+            live_data["quality_control"] = payload
+            st.success("Selesai. Project diselesaikan.")
+            next_step()
+            rerun()
+
+    render_nav(show_next=stage_status(active, "quality_control"), next_label="Lihat Ringkasan")
+
+
+# =========================================================
+# STEP 5 — SELESAI
+# =========================================================
+elif step == 5:
+    st.markdown("## Project Selesai")
+
+    tender = live_data.get("tender", {})
+    vs = live_data.get("vendor_selection", {})
+    se = live_data.get("site_execution", {})
+    qc = live_data.get("quality_control", {})
+
+    if not qc or qc.get("final_status") != "Ya":
+        st.warning("Project belum selesai.")
+    else:
+        st.success(f"Project **{meta['name']}** selesai.")
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("**Info Project**")
+            st.markdown(f"- Nama: {meta['name']}")
+            st.markdown(f"- Klien: {meta['client']}")
+            st.markdown(f"- Lokasi: {meta['location']}")
+            st.markdown(f"- Budget: {format_rupiah(meta['budget'])}")
+            st.markdown(f"- RAB Awal: {format_rupiah(meta.get('rab_awal', 0))}")
+
+        with c2:
+            st.markdown("**Hasil**")
+            if vs:
+                st.markdown(f"- Vendor: {vs.get('selected_vendor', '-')}")
+                st.markdown(f"- SPK: {format_rupiah(vs.get('selected_cost', 0))}")
+                st.markdown(f"- Penghematan: {format_rupiah(vs.get('saving', 0))}")
+            if se:
+                st.markdown(f"- Realisasi: {se.get('actual_pct', 0):.2f}%")
+                st.markdown(f"- SPI: {se.get('spi', 0):.3f}")
+            if qc:
+                st.markdown(f"- BAST: {qc.get('bast_number', '-')}")
+
+        st.markdown("---")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            all_data = {"tender": tender, "vendor_selection": vs,
+                        "site_execution": se, "quality_control": qc}
+            rows = []
+            for tahap, d in all_data.items():
+                if d:
+                    row = {"Tahap": label(tahap)}
+                    row.update({k: str(v) for k, v in d.items()})
+                    rows.append(row)
+            st.download_button(
+                "Unduh data (CSV)",
+                data=pd.DataFrame(rows).to_csv(index=False).encode("utf-8-sig"),
+                file_name=f"project_{meta['name'].replace(' ', '_')}.csv",
+                mime="text/csv",
+            )
+        with c2:
+            appts_final = fetch_appointments(pid)
+            if appts_final:
+                st.download_button(
+                    "Unduh Appointment (CSV)",
+                    data=pd.DataFrame(appts_final).to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"appointments_{meta['name'].replace(' ', '_')}.csv",
+                    mime="text/csv",
+                )
+
+    st.markdown("---")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("← Kembali ke QC", key="btn_bq"):
+            goto_step(4)
+            rerun()
+    with c2:
+        if st.button("Kembali ke Daftar Project", key="btn_bl"):
+            st.session_state.step = 0
+            rerun()
+
+st.markdown("---")
+st.caption("Vendor Selection & Project Control · Multi-project workspace · Data tersimpan di database.")
+
+# simpan semua perubahan ke database di akhir setiap run
+persist()
