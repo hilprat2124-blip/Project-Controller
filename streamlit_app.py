@@ -917,9 +917,10 @@ def _curve_num(v):
 
 
 def _find_day_header(df_raw, max_scan=60):
-    """Cari baris nomor hari (1,2,3,...) yang berada di bawah label 'Week N'.
-    Return (index_baris, [(kolom, hari), ...]) atau None."""
+    """Cari baris nomor hari (1,2,3,...) di bawah label 'Week N'.
+    Pilih baris dengan deret terpanjang, supaya baris tanggal (21..30,1..31) tidak terpilih."""
     n = min(len(df_raw), max_scan)
+    best_overall, best_row = [], None
     for i in range(n):
         row = list(df_raw.iloc[i].values)
         nums = []
@@ -940,56 +941,84 @@ def _find_day_header(df_raw, max_scan=60):
         wk = 0
         for k in range(max(0, i - 4), min(len(df_raw), i + 2)):
             wk = max(wk, sum(1 for c in df_raw.iloc[k].values if _week_no(c) is not None))
-        if wk >= 2 and len(best) >= 3 * wk:
-            return i, best
-    return None
+        if wk >= 2 and len(best) >= 3 * wk and len(best) > len(best_overall):
+            best_overall, best_row = best, i
+    if best_row is None:
+        return None
+    return best_row, best_overall
 
 
 def _row_tag(left_cells):
+    """Return (tag, is_cum, is_sum); tag = 'plan' / 'actual' / None."""
+    joined = _norm_text(" ".join(left_cells))
+    tag = None
     for t in left_cells:
-        key = re.sub(r"[^a-z]", "", t.lower())
-        if key in _PLAN_TAGS:
-            return "plan"
-        if key in _ACT_TAGS:
-            return "actual"
-    return None
+        toks = set(re.findall(r"[a-z]+", t.lower()))
+        if not toks or len(toks) > 3:
+            continue
+        if toks & _PLAN_TAGS:
+            tag = "plan"
+            break
+        if toks & _ACT_TAGS:
+            tag = "actual"
+            break
+    if tag is None:
+        return None, False, False
+    is_cum = any(k in joined for k in _CUM_WORDS)
+    is_sum = bool(_TOTAL_RE.search(joined)) or "progress" in joined or "subtotal" in joined
+    return tag, is_cum, is_sum
+
+
+def _is_total_of(vals, rows):
+    """True jika vals = jumlah semua baris sebelumnya (baris total, bukan item)."""
+    if len(rows) < 2:
+        return False
+    tot = [sum((r[i] or 0.0) for r in rows) for i in range(len(vals))]
+    if not any(t > 0 for t in tot):
+        return False
+    return all(abs((v or 0.0) - t) <= 1e-6 + 1e-4 * abs(t) for v, t in zip(vals, tot))
 
 
 def _extract_curve_daily(df_raw, found):
-    """Format harian: kolom = hari (1..N), tiap item punya baris 'Plan' dan 'Aktual'.
-    Hasil diringkas per minggu (7 hari)."""
+    """Format harian: kolom = hari (1..N), baris 'Plan'/'Aktual' per item + baris kumulatif.
+    Diringkas per minggu (7 hari)."""
     hdr, day_cols = found
     first_col = min(j for j, _ in day_cols)
-    ndays = max(d for _, d in day_cols)
+    dc = {}
+    for j, d in day_cols:
+        dc.setdefault(d, j)
+    day_cols = [(dc[d], d) for d in sorted(dc)]
+    ndays = len(day_cols)
 
     plan_items, act_items = [], []
     sum_rows = {"plan": None, "actual": None}
     cum_rows = {"plan": None, "actual": None}
     for row in df_raw.iloc[hdr + 1:].values:
         left = [_cell(row[k]) for k in range(min(first_col, len(row)))]
-        tag = _row_tag(left)
+        tag, is_cum, is_sum = _row_tag(left)
         if tag is None:
             continue
         vals = [_curve_num(row[j]) if j < len(row) else None for j, _ in day_cols]
         if all(v is None for v in vals):
             continue
-        text = _norm_text(" ".join(left))
-        if any(k in text for k in _CUM_WORDS):
+        items = plan_items if tag == "plan" else act_items
+        if is_cum:
             if cum_rows[tag] is None:
                 cum_rows[tag] = vals
-        elif _TOTAL_RE.search(text) or "progress" in text or "subtotal" in text:
+        elif is_sum or _is_total_of(vals, items):
             if sum_rows[tag] is None:
                 sum_rows[tag] = vals
         else:
-            (plan_items if tag == "plan" else act_items).append(vals)
+            items.append(vals)
 
     def daily_total(rows):
-        tot = [0.0] * len(day_cols)
+        tot = [0.0] * ndays
         for vals in rows:
             for i, v in enumerate(vals):
                 tot[i] += (v or 0.0)
         return tot
 
+    # --- rencana kumulatif ---
     if cum_rows["plan"] is not None:
         plan_cum = _ffill(cum_rows["plan"])
     elif sum_rows["plan"] is not None:
@@ -999,28 +1028,25 @@ def _extract_curve_daily(df_raw, found):
     else:
         return None
 
-    actual_cum, last_act = None, -1
+    # --- realisasi kumulatif ---
+    actual_cum_full = None
     if cum_rows["actual"] is not None:
-        src_vals = cum_rows["actual"]
-        nz = [i for i, v in enumerate(src_vals) if v]
-        if nz:
-            last_act = nz[-1]
-            prev, actual_cum = 0.0, []
-            for i in range(last_act + 1):
-                prev = src_vals[i] if src_vals[i] is not None else prev
-                actual_cum.append(prev)
-    else:
-        if sum_rows["actual"] is not None:
-            daily_act = [(v or 0.0) for v in sum_rows["actual"]]
-        elif act_items:
-            daily_act = daily_total(act_items)
-        else:
-            daily_act = None
-        if daily_act is not None:
-            nz = [i for i, v in enumerate(daily_act) if v > 0]
-            if nz:
-                last_act = nz[-1]
-                actual_cum = _cumsum_none(daily_act[:last_act + 1])
+        actual_cum_full = _ffill(cum_rows["actual"])
+    elif sum_rows["actual"] is not None:
+        actual_cum_full = _cumsum_none(sum_rows["actual"])
+    elif act_items:
+        actual_cum_full = _cumsum_none(daily_total(act_items))
+
+    actual_cum, last_act = None, -1
+    if actual_cum_full is not None:
+        # hari terakhir yang benar-benar ada progres (kumulatif berhenti naik setelahnya)
+        for i in range(len(actual_cum_full) - 1, -1, -1):
+            prev = actual_cum_full[i - 1] if i > 0 else 0.0
+            if actual_cum_full[i] > prev + 1e-9:
+                last_act = i
+                break
+        if last_act >= 0:
+            actual_cum = actual_cum_full[:last_act + 1]
 
     factor = 100.0 if max(plan_cum) <= 1.5 else 1.0
     nweeks = (ndays + 6) // 7
@@ -1042,7 +1068,7 @@ def _extract_curve_daily(df_raw, found):
                    "Periksa file / sheet yang dipilih.")
     return {"weeks": weeks, "plan": plan,
             "actual": actual if actual_cum is not None else None,
-            "mode": "harian dijumlah per minggu", "warning": warning}
+            "mode": f"harian ({ndays} hari) dijumlah per minggu", "warning": warning}
 
 
 def _extract_curve(df_raw):
