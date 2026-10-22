@@ -269,7 +269,9 @@ def solve_vendor_lp(vendor_names, costs, budget, scores=None,
 # ---------------------------------------------------------
 # HELPER IMPORT EXCEL BOQ
 # ---------------------------------------------------------
-BOQ_COLUMNS = ["No", "Item Pekerjaan", "Volume", "Satuan", "Spesifikasi", "Kompleksitas"]
+BOQ_COLUMNS = ["No", "Description", "Specification", "Volume", "Unit",
+               "Unit Price (Rp)", "Total Price (Rp)"]
+BOQ_NUM_COLS = ["Unit Price (Rp)", "Total Price (Rp)"]
 
 WBS_COLUMNS = ["No", "Item Pekerjaan", "Harga (juta Rp)", "Mulai", "Selesai", "Realisasi (%)"]
 
@@ -291,34 +293,57 @@ def _norm_text(v):
     return re.sub(r"\s+", " ", _cell(v).lower()).strip()
 
 
-def _clean_volume(v):
+def _to_number(v):
+    """'88,00' -> 88.0 ; '1.234,50' -> 1234.5 ; '88.0' -> 88.0 ; '-' atau '' -> None"""
     s = _cell(v)
     if not s:
-        return ""
+        return None
+    s = re.sub(r"[^\d,\.\-]", "", s)  # buang 'Rp', spasi, huruf
+    if s in ("", "-", ".", ",", "-."):
+        return None
+    if "," in s and "." in s:
+        if s.rfind(",") > s.rfind("."):      # format Indonesia: 1.234,50
+            s = s.replace(".", "").replace(",", ".")
+        else:                                 # format US: 1,234.50
+            s = s.replace(",", "")
+    elif "," in s:
+        if s.count(",") > 1:
+            s = s.replace(",", "")
+        else:
+            s = s.replace(",", ".")           # 88,00 -> 88.00
+    elif s.count(".") > 1:
+        s = s.replace(".", "")
     try:
-        f = float(s.replace(",", ""))
-        if f == int(f):
-            return str(int(f))
-        return str(round(f, 4))
-    except (ValueError, OverflowError):
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _clean_volume(v):
+    s = _cell(v)
+    if not s or s in ("-", "–", "—"):
+        return ""
+    num = _to_number(s)
+    if num is None:
         return s
+    if num == int(num):
+        return str(int(num))
+    return str(round(num, 4))
 
 
-def _norm_complexity(v):
-    s = _norm_text(v)
-    if s in ("rendah", "low", "r"):
-        return "Rendah"
-    if s in ("tinggi", "high", "t"):
-        return "Tinggi"
-    return "Sedang"
+def _clean_no(v):
+    s = _cell(v)
+    if re.fullmatch(r"\d+\.0+", s):
+        s = s.split(".")[0]
+    return s
 
 
-_PRICE_WORDS = {"harga", "jumlah", "bobot", "total", "price", "amount",
-                "biaya", "upah", "bahan", "rp"}
+_PRICE_WORDS = {"harga", "jumlah", "total", "price", "amount", "biaya",
+                "upah", "bahan", "rp"}
 _VOLUME_WORDS = {"volume", "vol", "qty", "kuantitas", "quantity"}
 _UNIT_WORDS = {"satuan", "sat", "unit", "uom"}
-_SPEC_WORDS = {"spesifikasi", "spek", "specification"}
-_COMPLEX_WORDS = {"kompleksitas", "complexity"}
+_SPEC_WORDS = {"spesifikasi", "spek", "specification", "specifications",
+               "spesification", "spec"}
 _ITEM_WORDS = {"uraian", "deskripsi", "description", "pekerjaan"}
 _ITEM_WEAK_WORDS = {"item", "nama"}
 _NO_WORDS = {"no", "nomor"}
@@ -330,49 +355,50 @@ def _match_target(cell, weak=False):
     if not key:
         return None
     tokens = set(re.findall(r"[a-z0-9]+", key))
-    if not tokens:
+    if not tokens or "bobot" in tokens:
         return None
-    # kolom harga/jumlah/bobot bukan kolom yang kita butuhkan
     if tokens & _PRICE_WORDS:
+        if tokens & {"total", "jumlah"}:
+            return "TotalPrice"
+        if tokens & {"harga", "price"}:
+            return "UnitPrice"
         return None
     if tokens & _VOLUME_WORDS:
         return "Volume"
     if tokens & _UNIT_WORDS:
-        return "Satuan"
+        return "Unit"
     if tokens & _SPEC_WORDS:
-        return "Spesifikasi"
-    if tokens & _COMPLEX_WORDS:
-        return "Kompleksitas"
+        return "Specification"
     if tokens & _ITEM_WORDS:
-        return "Item Pekerjaan"
+        return "Description"
     if tokens & _NO_WORDS:
         return "No"
     if weak and (tokens & _ITEM_WEAK_WORDS):
-        return "Item Pekerjaan"
+        return "Description"
     return None
 
 
 def _build_mapping(cells):
-    """Return dict {nama_kolom_standar: indeks_kolom}. Tiap target hanya dipakai SEKALI
-    (kolom pertama yang cocok), sehingga tidak ada nama kolom ganda."""
+    """Return dict {target: indeks_kolom}. Tiap target dipakai SEKALI (kolom pertama
+    yang cocok), sehingga tidak ada nama kolom ganda."""
     mapping = {}
     for j, c in enumerate(cells):
         t = _match_target(c)
         if t and t not in mapping:
             mapping[t] = j
-    if "Item Pekerjaan" not in mapping:
+    if "Description" not in mapping:
         used = set(mapping.values())
         for j, c in enumerate(cells):
             if j in used:
                 continue
-            if _match_target(c, weak=True) == "Item Pekerjaan":
-                mapping["Item Pekerjaan"] = j
+            if _match_target(c, weak=True) == "Description":
+                mapping["Description"] = j
                 break
     return mapping
 
 
 def _header_ok(mapping):
-    return all(k in mapping for k in ("Item Pekerjaan", "Volume", "Satuan"))
+    return all(k in mapping for k in ("Description", "Volume", "Unit"))
 
 
 def _find_header(df_raw, max_scan=80):
@@ -405,31 +431,76 @@ def _extract_items(df_raw):
     data = df_raw.iloc[header_idx + nrows:].values
     ncols = data.shape[1] if data.ndim == 2 else 0
 
-    def get(row, name):
+    def raw(row, name):
         j = mapping.get(name)
         if j is None or j >= ncols:
             return ""
-        return _cell(row[j])
+        return row[j]
 
     items = []
     for row in data:
-        item = get(row, "Item Pekerjaan")
-        if not item:
+        desc = re.sub(r"\s+", " ", _cell(raw(row, "Description")))
+        if not desc:
             continue
-        if re.fullmatch(r"[\d\.\s,]+", item):  # hanya angka -> bukan nama pekerjaan
+        if re.fullmatch(r"[\d\.\s,]+", desc):  # hanya angka -> bukan nama pekerjaan
             continue
-        volume = _clean_volume(get(row, "Volume"))
-        if not volume and _SKIP_ROW.match(item.lower()):
+        volume = _clean_volume(raw(row, "Volume"))
+        no = _clean_no(raw(row, "No"))
+        if not volume and _SKIP_ROW.match(desc.lower()):
+            continue
+        # baris tanpa volume hanya dipertahankan jika berupa judul bagian
+        if not volume and not no and not desc.isupper():
             continue
         items.append({
-            "No": 0,
-            "Item Pekerjaan": item,
+            "No": no,
+            "Description": desc,
+            "Specification": re.sub(r"\s+", " ", _cell(raw(row, "Specification"))),
             "Volume": volume,
-            "Satuan": get(row, "Satuan"),
-            "Spesifikasi": get(row, "Spesifikasi"),
-            "Kompleksitas": _norm_complexity(get(row, "Kompleksitas")),
+            "Unit": _cell(raw(row, "Unit")),
+            "Unit Price (Rp)": _to_number(raw(row, "UnitPrice")),
+            "Total Price (Rp)": _to_number(raw(row, "TotalPrice")),
         })
     return items
+
+
+_OLD_KEYS = {"Item Pekerjaan": "Description", "Spesifikasi": "Specification",
+             "Satuan": "Unit"}
+
+
+def _normalize_items(records):
+    """Rapikan list record BOQ (termasuk data lama) ke skema BOQ_COLUMNS."""
+    out = []
+    for r in records:
+        d = {}
+        for k, v in dict(r).items():
+            d[_OLD_KEYS.get(k, k)] = v
+        row = {}
+        for c in BOQ_COLUMNS:
+            if c in BOQ_NUM_COLS:
+                row[c] = _to_number(d.get(c))
+            elif c == "No":
+                row[c] = _clean_no(d.get(c))
+            elif c == "Volume":
+                row[c] = _clean_volume(d.get(c))
+            else:
+                row[c] = _cell(d.get(c))
+        out.append(row)
+    return out
+
+
+def _sample_boq_rows():
+    """Contoh baris BOQ dengan struktur sama seperti file Excel BOQ."""
+    return [
+        {"No": "II.1.A", "Description": "PEKERJAAN PERSIAPAN", "Specification": "",
+         "Volume": "", "Unit": "", "Unit Price (Rp)": None, "Total Price (Rp)": None},
+        {"No": "1", "Description": "Pek. Bouwplank", "Specification": "",
+         "Volume": "88", "Unit": "m'", "Unit Price (Rp)": None, "Total Price (Rp)": None},
+        {"No": "2", "Description": "Pek. Clearing area; termasuk bongkar dan pemindahan Kontainer eksisting",
+         "Specification": "termasuk pemindahan furniture ke ruangan sementara",
+         "Volume": "315", "Unit": "m2", "Unit Price (Rp)": None, "Total Price (Rp)": None},
+        {"No": "3", "Description": "Pek. Bongkaran Dinding Eksisting", "Specification": "",
+         "Volume": "129.4", "Unit": "m2", "Unit Price (Rp)": None, "Total Price (Rp)": None},
+    ]
 
 
 def _decode_csv_bytes(data):
@@ -471,22 +542,27 @@ def _parse_boq_cached(data, name):
         except Exception as e:
             raise ValueError(f"Gagal membaca file Excel: {e}")
 
-    all_items = []
+    per_sheet = []
     for _sheet_name, df_raw in sheets.items():
         if df_raw is None or df_raw.empty:
             continue
         try:
-            all_items.extend(_extract_items(df_raw))
+            its = _extract_items(df_raw)
         except Exception:
             continue  # satu sheet bermasalah tidak boleh menggagalkan seluruh file
+        if its:
+            per_sheet.append(its)
+
+    # sheet rekap (tanpa volume) diabaikan; pakai sheet yang punya baris volume
+    good = [its for its in per_sheet if sum(1 for i in its if i["Volume"]) >= 3]
+    chosen = good or per_sheet
+    all_items = [it for its in chosen for it in its]
 
     if not all_items:
         raise ValueError(
             "Tidak ada data BOQ yang bisa dibaca. Pastikan file memiliki tabel dengan "
-            "kolom Uraian/Deskripsi Pekerjaan, Volume, dan Satuan."
+            "kolom Description/Uraian, Volume, dan Unit/Satuan."
         )
-    for i, it in enumerate(all_items, start=1):
-        it["No"] = i
     return all_items
 
 
@@ -573,52 +649,38 @@ def vendor_template_bytes():
 
 
 def boq_template_bytes():
-    """Return (data, filename, mime) template RAB sesuai standar Excel."""
-    template_data = [
-        {"No": 1, "Item Pekerjaan": "BAB I. PEKERJAAN PENDAHULUAN", "Volume": "", "Satuan": "", "Spesifikasi": "", "Kompleksitas": "Rendah"},
-        {"No": 2, "Item Pekerjaan": "Mobilisasi dan Demobilisasi", "Volume": "1", "Satuan": "ls", "Spesifikasi": "", "Kompleksitas": "Rendah"},
-        {"No": 3, "Item Pekerjaan": "Site Management Proyek", "Volume": "1", "Satuan": "ls", "Spesifikasi": "", "Kompleksitas": "Sedang"},
-        {"No": 4, "Item Pekerjaan": "BAB II. BANGUNAN OFFICE", "Volume": "", "Satuan": "", "Spesifikasi": "", "Kompleksitas": "Rendah"},
-        {"No": 5, "Item Pekerjaan": "II.1 PEKERJAAN STRUKTUR", "Volume": "", "Satuan": "", "Spesifikasi": "", "Kompleksitas": "Rendah"},
-        {"No": 6, "Item Pekerjaan": "Pekerjaan Pondasi Footplate (FP1)", "Volume": "5.5", "Satuan": "m³", "Spesifikasi": "Beton K-300", "Kompleksitas": "Tinggi"},
-        {"No": 7, "Item Pekerjaan": "Pembesian Footplate", "Volume": "1560.75", "Satuan": "kg", "Spesifikasi": "BJTS U42", "Kompleksitas": "Tinggi"},
-        {"No": 8, "Item Pekerjaan": "Pekerjaan Kolom K1", "Volume": "5.47", "Satuan": "m³", "Spesifikasi": "Beton K-300", "Kompleksitas": "Tinggi"},
-        {"No": 9, "Item Pekerjaan": "II.2 PEKERJAAN ARSITEKTUR", "Volume": "", "Satuan": "", "Spesifikasi": "", "Kompleksitas": "Rendah"},
-        {"No": 10, "Item Pekerjaan": "Pek. Pasangan Dinding Bata Ringan", "Volume": "251.64", "Satuan": "m²", "Spesifikasi": "Tebal 10 cm", "Kompleksitas": "Sedang"},
-        {"No": 11, "Item Pekerjaan": "Pek. Plasteran", "Volume": "398.11", "Satuan": "m²", "Spesifikasi": "Mortar MU-302", "Kompleksitas": "Sedang"},
-        {"No": 12, "Item Pekerjaan": "BAB III. CALIBRATION ROOM", "Volume": "", "Satuan": "", "Spesifikasi": "", "Kompleksitas": "Rendah"},
-        {"No": 13, "Item Pekerjaan": "III.1 PEKERJAAN STRUKTUR", "Volume": "", "Satuan": "", "Spesifikasi": "", "Kompleksitas": "Rendah"},
-        {"No": 14, "Item Pekerjaan": "Pekerjaan GWT (Ground Water Tank)", "Volume": "3.03", "Satuan": "m³", "Spesifikasi": "Beton K-300", "Kompleksitas": "Tinggi"}
-    ]
-    df = pd.DataFrame(template_data)
+    """Return (data, filename, mime) template BOQ dengan kolom sama seperti file Excel BOQ."""
+    rows = []
+    for r in _sample_boq_rows():
+        vol = _to_number(r["Volume"])
+        rows.append({
+            "NO": r["No"],
+            "DESCRIPTION": r["Description"],
+            "SPECIFICATION": r["Specification"],
+            "VOLUME": vol,
+            "UNIT": r["Unit"],
+            "UNIT PRICE (Rp)": r["Unit Price (Rp)"],
+            "TOTAL PRICE (Rp)": r["Total Price (Rp)"],
+        })
+    df = pd.DataFrame(rows)
 
     if HAS_OPENPYXL:
         try:
             buf = io.BytesIO()
             with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                df.to_excel(writer, index=False, sheet_name="Template BOQ")
-
-                worksheet = writer.sheets["Template BOQ"]
-                worksheet.column_dimensions['A'].width = 5
-                worksheet.column_dimensions['B'].width = 50
-                worksheet.column_dimensions['C'].width = 10
-                worksheet.column_dimensions['D'].width = 10
-                worksheet.column_dimensions['E'].width = 30
-                worksheet.column_dimensions['F'].width = 15
-
+                df.to_excel(writer, index=False, sheet_name="BOQ")
+                ws = writer.sheets["BOQ"]
+                for col, w in zip("ABCDEFG", (10, 60, 38, 12, 8, 18, 18)):
+                    ws.column_dimensions[col].width = w
             return (
                 buf.getvalue(),
-                "template_boq_rab.xlsx",
+                "template_boq.xlsx",
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
         except Exception:
             pass
 
-    return (
-        df.to_csv(index=False).encode("utf-8-sig"),
-        "template_boq_rab.csv",
-        "text/csv",
-    )
+    return df.to_csv(index=False).encode("utf-8-sig"), "template_boq.csv", "text/csv"
 
 
 # =========================================================
@@ -701,20 +763,7 @@ def project_progress(project):
 
 
 def default_items():
-    return pd.DataFrame([
-        {"No": 1, "Item Pekerjaan": "Fabrikasi Pipa Carbon Steel", "Volume": "500", "Satuan": "m",
-         "Spesifikasi": "ASTM A106 Gr.B", "Kompleksitas": "Sedang"},
-        {"No": 2, "Item Pekerjaan": "Welding SMAW + GTAW", "Volume": "300", "Satuan": "joint",
-         "Spesifikasi": "WPS sesuai ASME IX", "Kompleksitas": "Tinggi"},
-        {"No": 3, "Item Pekerjaan": "NDT Radiografi", "Volume": "150", "Satuan": "titik",
-         "Spesifikasi": "ASME V Article 2", "Kompleksitas": "Tinggi"},
-        {"No": 4, "Item Pekerjaan": "Hydrotest", "Volume": "3", "Satuan": "line",
-         "Spesifikasi": "ASME B31.3", "Kompleksitas": "Sedang"},
-        {"No": 5, "Item Pekerjaan": "Support & Hanger Installation", "Volume": "80", "Satuan": "unit",
-         "Spesifikasi": "MSS SP-58", "Kompleksitas": "Rendah"},
-        {"No": 6, "Item Pekerjaan": "Painting & Coating", "Volume": "800", "Satuan": "m²",
-         "Spesifikasi": "SSPC-SP10", "Kompleksitas": "Rendah"},
-    ])
+    return pd.DataFrame(_sample_boq_rows(), columns=BOQ_COLUMNS)
 
 
 def default_wbs():
@@ -1103,8 +1152,6 @@ if step == 1:
                             new_items = [dict(it) for it in parsed]
                         else:
                             new_items = list(active["items_data"]) + [dict(it) for it in parsed]
-                        for i, it in enumerate(new_items, start=1):
-                            it["No"] = i
                         active["items_data"] = new_items
                         active["items_ver"] += 1   # reset editor & uploader
                         st.rerun()
@@ -1116,6 +1163,7 @@ if step == 1:
             "volume, satuan, spesifikasi, dan kompleksitas."
         )
 
+        active["items_data"] = _normalize_items(active["items_data"])
         items_df = pd.DataFrame(active["items_data"], columns=BOQ_COLUMNS)
         items_edited = st.data_editor(
             items_df,
@@ -1124,17 +1172,18 @@ if step == 1:
             num_rows="dynamic",
             key=f"items_editor_{pid}_{active['items_ver']}",
             column_config={
-                "No": st.column_config.NumberColumn("No", min_value=1, step=1, width="small"),
-                "Item Pekerjaan": st.column_config.TextColumn("Item Pekerjaan", required=True, width="large"),
-                "Volume": st.column_config.TextColumn("Volume", width="small"),
-                "Satuan": st.column_config.TextColumn("Satuan", width="small"),
-                "Spesifikasi": st.column_config.TextColumn("Spesifikasi", width="medium"),
-                "Kompleksitas": st.column_config.SelectboxColumn(
-                    "Kompleksitas", options=["Rendah", "Sedang", "Tinggi"], width="small"
-                ),
+                "No": st.column_config.TextColumn("NO", width="small"),
+                "Description": st.column_config.TextColumn("DESCRIPTION", required=True, width="large"),
+                "Specification": st.column_config.TextColumn("SPECIFICATION", width="medium"),
+                "Volume": st.column_config.TextColumn("VOLUME", width="small"),
+                "Unit": st.column_config.TextColumn("UNIT", width="small"),
+                "Unit Price (Rp)": st.column_config.NumberColumn(
+                    "UNIT PRICE (Rp)", min_value=0.0, format="%.0f", width="small"),
+                "Total Price (Rp)": st.column_config.NumberColumn(
+                    "TOTAL PRICE (Rp)", min_value=0.0, format="%.0f", width="small"),
             },
         )
-        active["items_data"] = items_edited.to_dict("records")
+        active["items_data"] = _normalize_items(items_edited.to_dict("records"))
         st.caption(f"Total item: **{len(items_edited)}**")
 
     dokumen_lengkap = all([doc_drawing, doc_rks, doc_spek, doc_boq, doc_k3])
@@ -1214,7 +1263,8 @@ elif step == 2:
         if not items_data:
             st.warning("BOQ belum diisi. Kembali ke Tahap 1.")
         else:
-            st.dataframe(pd.DataFrame(items_data), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(_normalize_items(items_data), columns=BOQ_COLUMNS),
+                         use_container_width=True, hide_index=True)
 
         st.markdown("---")
         st.markdown("### Vendor yang Diundang")
