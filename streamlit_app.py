@@ -762,6 +762,178 @@ def scurve_file_from_row(row):
 
 
 # =========================================================
+# HELPER GRAFIK S-CURVE DARI EXCEL (hanya kurva, tanpa tabel)
+# =========================================================
+_WEEK_RE = re.compile(r"(?:minggu(?:\s*ke)?|week|mg|m|w)\s*[-_.]*\s*(\d+)")
+_CUM_WORDS = ("kumulatif", "komulatif", "kumulatip", "cumulative")
+_ACT_RE = re.compile(r"\b(realisasi|aktual|actual|real)\b")
+_PLAN_RE = re.compile(r"\b(rencana|plan|target)\b")
+_TOTAL_RE = re.compile(r"\b(total|jumlah)\b")
+
+
+def _week_no(v):
+    s = _norm_text(v)
+    if not s:
+        return None
+    m = _WEEK_RE.fullmatch(s)
+    return int(m.group(1)) if m else None
+
+
+def _find_week_header(df_raw, max_scan=80):
+    """Cari baris header minggu (M1, M2, ... / Minggu 1 / W1 / 1,2,3,...)."""
+    n = min(len(df_raw), max_scan)
+    for i in range(n):
+        row = list(df_raw.iloc[i].values)
+        cols = [(j, _week_no(c)) for j, c in enumerate(row)]
+        cols = [(j, w) for j, w in cols if w is not None]
+        if len(cols) >= 3:
+            return i, cols
+    for i in range(n):
+        row = list(df_raw.iloc[i].values)
+        cols = []
+        for j, c in enumerate(row):
+            s = _cell(c)
+            if re.fullmatch(r"\d+(\.0+)?", s):
+                cols.append((j, int(float(s))))
+        if len(cols) >= 4 and [w for _, w in cols] == list(range(cols[0][1], cols[0][1] + len(cols))):
+            return i, cols
+    return None
+
+
+def _classify_curve_row(label):
+    is_cum = any(k in label for k in _CUM_WORDS)
+    is_act = bool(_ACT_RE.search(label))
+    is_plan = bool(_PLAN_RE.search(label))
+    if is_cum and is_act:
+        return "actual_cum"
+    if is_cum:
+        return "plan_cum"
+    if is_act:
+        return "actual_week"
+    if _TOTAL_RE.search(label) or (is_plan and "progress" in label):
+        return "plan_week"
+    return "item"
+
+
+def _ffill(vs):
+    out, prev = [], 0.0
+    for v in vs:
+        if v is not None:
+            prev = v
+        out.append(prev)
+    return out
+
+
+def _cumsum_none(vs):
+    out, t = [], 0.0
+    for v in vs:
+        t += (v or 0.0)
+        out.append(t)
+    return out
+
+
+def _extract_curve(df_raw):
+    found = _find_week_header(df_raw)
+    if found is None:
+        return None
+    hdr, cols = found
+    seen, wc = set(), []
+    for j, w in cols:
+        if w not in seen:
+            seen.add(w)
+            wc.append((j, w))
+    wc.sort(key=lambda x: x[1])
+    weeks = [w for _, w in wc]
+    first_col = min(j for j, _ in wc)
+
+    series = {"plan_cum": None, "actual_cum": None, "plan_week": None, "actual_week": None}
+    items = []
+    for row in df_raw.iloc[hdr + 1:].values:
+        vals = [_to_number(row[j]) if j < len(row) else None for j, _ in wc]
+        if all(v is None for v in vals):
+            continue
+        label = _norm_text(" ".join(_cell(row[k]) for k in range(min(first_col, len(row)))))
+        kind = _classify_curve_row(label)
+        if kind == "item":
+            if any((v or 0) > 0 for v in vals):
+                items.append(vals)
+        elif series[kind] is None:
+            series[kind] = vals
+
+    # --- kurva rencana ---
+    if series["plan_cum"] is not None:
+        plan = _ffill(series["plan_cum"])
+    elif series["plan_week"] is not None:
+        plan = _cumsum_none(series["plan_week"])
+    elif items:
+        plan = _cumsum_none([sum((v or 0.0) for v in col) for col in zip(*items)])
+    else:
+        return None
+
+    # --- kurva realisasi (opsional) ---
+    actual = None
+    if series["actual_cum"] is not None:
+        src, mode = series["actual_cum"], "cum"
+    elif series["actual_week"] is not None:
+        src, mode = series["actual_week"], "week"
+    else:
+        src, mode = None, None
+    if src is not None:
+        filled = [i for i, v in enumerate(src) if v is not None]
+        if filled:
+            last = filled[-1]
+            actual = [None] * len(src)
+            run, prev = 0.0, 0.0
+            for i in range(last + 1):
+                v = src[i]
+                if mode == "cum":
+                    prev = v if v is not None else prev
+                    actual[i] = prev
+                else:
+                    run += (v or 0.0)
+                    actual[i] = run
+
+    # sel berformat persen di Excel tersimpan sebagai pecahan (0-1) -> jadikan persen
+    factor = 100.0 if max(plan) <= 1.5 else 1.0
+    plan = [round(v * factor, 2) for v in plan]
+    if actual is not None:
+        actual = [None if v is None else round(v * factor, 2) for v in actual]
+    return {"weeks": weeks, "plan": plan, "actual": actual}
+
+
+def parse_scurve_chart(data, name):
+    """Baca kurva S-Curve (rencana & realisasi kumulatif) dari file Excel/CSV."""
+    name = (name or "").lower()
+    if name.endswith(".csv"):
+        sheets = {"CSV": _csv_to_frame(data)}
+    else:
+        if name.endswith(".xlsx") and not HAS_OPENPYXL:
+            raise ValueError("Library 'openpyxl' belum terpasang. Gunakan CSV atau install openpyxl.")
+        try:
+            sheets = pd.read_excel(io.BytesIO(data), sheet_name=None, dtype=str, header=None)
+        except ImportError:
+            raise ValueError("Library pembaca Excel belum terpasang (openpyxl untuk .xlsx).")
+        except Exception as e:
+            raise ValueError(f"Gagal membaca file Excel: {e}")
+
+    for sheet_name, df_raw in sheets.items():
+        if df_raw is None or df_raw.empty:
+            continue
+        try:
+            res = _extract_curve(df_raw)
+        except Exception:
+            res = None
+        if res:
+            res["sheet"] = str(sheet_name)
+            return res
+    raise ValueError(
+        "Kurva S-Curve tidak ditemukan. Pastikan file punya header minggu (M1, M2, ...) dan baris "
+        "'Progress Rencana Kumulatif' (atau baris item per minggu). Pastikan juga nilainya sudah "
+        "terhitung (bukan rumus yang belum tersimpan)."
+    )
+
+
+# =========================================================
 # SUPABASE: CLIENT & AUTH
 # =========================================================
 def get_client():
@@ -863,6 +1035,7 @@ def _fill_defaults(p):
     for k in ("tender", "vendor_selection", "site_execution", "quality_control"):
         p["live_data"].setdefault(k, {})
     p.setdefault("wbs_data", None)
+    p.setdefault("scurve_chart", None)
     p.setdefault("items_data", None)
     p.setdefault("items_ver", 0)
     p.setdefault("invited_vendors", [])
@@ -2092,9 +2265,8 @@ elif step == 3:
     st.markdown("## Tahap 3 — Site Execution")
     st.markdown(
         "<div class='flow-hint'>"
-        "Unduh S-Curve yang diupload vendor, lalu isi tabel WBS item pekerjaan — tiap item punya harga, "
-        "bobot, dan rentang minggu. Sistem akan hitung distribusi bobot per minggu, total per minggu, "
-        "dan progress kumulatif dalam format tabel seperti Excel, plus grafik S-Curve."
+        "Unduh S-Curve yang diupload vendor, atau upload file Excel S-Curve. Sistem hanya membuat "
+        "grafik S-Curve (rencana vs realisasi) dari file tersebut, tanpa menampilkan tabel."
         "</div>",
         unsafe_allow_html=True,
     )
@@ -2108,248 +2280,148 @@ elif step == 3:
     st.markdown("### S-Curve dari Vendor")
     sel_email_v = vs.get("selected_vendor_email", "")
     sc_sub = fetch_scurve(pid, sel_email_v) if sel_email_v else None
+    vendor_file = None
     if not sel_email_v:
         st.info("Email vendor terpilih belum tersimpan, jadi S-Curve vendor tidak bisa dicari.")
     elif not sc_sub:
         st.warning("Vendor terpilih belum mengupload S-Curve.")
     else:
-        sc_file_info = scurve_file_from_row(sc_sub)
+        vendor_file = scurve_file_from_row(sc_sub)
         st.success(f"S-Curve sudah diupload {fmt_ts(sc_sub.get('uploaded_at'))} · "
                    f"file {sc_sub.get('filename') or '-'}")
-        if sc_file_info:
-            sc_bytes, sc_fname, sc_mime = sc_file_info
+        if vendor_file:
+            sc_bytes, sc_fname, sc_mime = vendor_file
             st.download_button("Unduh S-Curve dari Vendor", data=sc_bytes,
                                file_name=sc_fname, mime=sc_mime, key=f"dl_sc_{pid}")
         else:
             st.warning("File S-Curve tidak bisa dibaca (kemungkinan data lama dengan format berbeda). "
                        "Minta vendor upload ulang.")
 
-    st.markdown("### Tabel Rencana Kerja (WBS)")
+    st.markdown("### Grafik S-Curve dari Excel")
+    st.caption("Grafik dibuat langsung dari S-Curve di file Excel (baris Progress Rencana Kumulatif dan "
+               "Progress Realisasi Kumulatif). Jika baris kumulatif tidak ada, kurva dihitung dari "
+               "baris item / total per minggu.")
 
-    if active.get("wbs_data") is None:
-        active["wbs_data"] = default_wbs().to_dict("records")
+    VENDOR_OPT = "Pakai file S-Curve dari vendor"
+    UPLOAD_OPT = "Upload file Excel baru"
+    src_opts = ([VENDOR_OPT] if vendor_file else []) + [UPLOAD_OPT]
+    src_choice = st.radio("Sumber file", src_opts, horizontal=True, key=f"sc_src_{pid}")
 
-    wbs_df = pd.DataFrame(active["wbs_data"], columns=WBS_COLUMNS)
-    wbs_raw = st.data_editor(
-        wbs_df, use_container_width=True, hide_index=True, num_rows="dynamic",
-        key=f"wbs_editor_{pid}_{active.get('wbs_ver', 0)}",
-        column_config={
-            "No": st.column_config.TextColumn("No", width="small", help="Nomor/abjad urut (A, B, C atau 1, 2, 3)"),
-            "Item Pekerjaan": st.column_config.TextColumn("Uraian Pekerjaan", required=True, width="large"),
-            "Harga (juta Rp)": st.column_config.NumberColumn("Harga (juta Rp)", min_value=0.0, step=1.0, format="%.1f"),
-            "Mulai": st.column_config.NumberColumn("Mulai (M)", min_value=1, step=1, width="small"),
-            "Selesai": st.column_config.NumberColumn("Selesai (M)", min_value=1, step=1, width="small"),
-            "Realisasi (%)": st.column_config.NumberColumn("Real. (%)", min_value=0.0, max_value=100.0, step=1.0, format="%.1f"),
-        },
-    )
-    active["wbs_data"] = json.loads(wbs_raw.to_json(orient="records"))
-
-    wbs_edited = wbs_raw.copy()
-    wbs_edited["Item Pekerjaan"] = wbs_edited["Item Pekerjaan"].fillna("").astype(str).str.strip()
-    wbs_edited = wbs_edited[wbs_edited["Item Pekerjaan"] != ""].copy()
-    wbs_edited["No"] = wbs_edited["No"].fillna("").astype(str)
-    wbs_edited["Harga (juta Rp)"] = pd.to_numeric(
-        wbs_edited["Harga (juta Rp)"], errors="coerce").fillna(0.0).clip(lower=0.0)
-    wbs_edited["Realisasi (%)"] = pd.to_numeric(
-        wbs_edited["Realisasi (%)"], errors="coerce").fillna(0.0).clip(lower=0.0, upper=100.0)
-    wbs_edited["Mulai"] = pd.to_numeric(
-        wbs_edited["Mulai"], errors="coerce").fillna(1).clip(lower=1).astype(int)
-    wbs_edited["Selesai"] = pd.to_numeric(
-        wbs_edited["Selesai"], errors="coerce").fillna(1).clip(lower=1).astype(int)
-    wbs_edited["Selesai"] = np.maximum(wbs_edited["Selesai"].values, wbs_edited["Mulai"].values)
-    wbs_edited = wbs_edited.reset_index(drop=True)
-
-    if wbs_edited.empty:
-        st.warning("Tabel WBS kosong.")
-        render_nav(show_next=False)
-        stop_app()
-
-    total_harga = float(wbs_edited["Harga (juta Rp)"].sum())
-    if total_harga > 0:
-        wbs_edited["Bobot (%)"] = (wbs_edited["Harga (juta Rp)"] / total_harga * 100).round(2)
+    chart_bytes, chart_name = None, ""
+    if src_choice == VENDOR_OPT and vendor_file:
+        chart_bytes, chart_name = vendor_file[0], vendor_file[1]
     else:
-        wbs_edited["Bobot (%)"] = 0.0
-
-    max_week = int(wbs_edited["Selesai"].max())
-    weeks = list(range(1, max_week + 1))
-
-    distrib_matrix = []
-    for _, row in wbs_edited.iterrows():
-        w_start = int(row["Mulai"])
-        w_end = int(row["Selesai"])
-        bobot = float(row["Bobot (%)"])
-        span = w_end - w_start + 1
-
-        week_vals = [0.0] * max_week
-        if span > 0 and bobot > 0:
-            ts = np.linspace(0, 1, span + 1)
-            s_vals = np.array([sigmoid_kernel(t, k=4.0) for t in ts])
-            weekly = np.diff(s_vals) * bobot
-            if weekly.sum() > 0:
-                weekly = weekly / weekly.sum() * bobot
-            for i, w in enumerate(range(w_start, w_end + 1)):
-                week_vals[w - 1] = round(float(weekly[i]), 2)
-        distrib_matrix.append(week_vals)
-
-    total_per_week = np.sum(distrib_matrix, axis=0).round(2)
-    cum_plan = np.cumsum(total_per_week).round(2)
-
-    current_week = st.number_input(
-        "Minggu saat ini (untuk realisasi)", min_value=1, max_value=max_week,
-        value=min(max_week, max(1, int(max_week * 0.6))), step=1, key=f"current_week_{pid}",
-    )
-    current_week = int(current_week)
-
-    distrib_actual = []
-    for _, row in wbs_edited.iterrows():
-        w_start = int(row["Mulai"])
-        w_end = int(row["Selesai"])
-        bobot = float(row["Bobot (%)"])
-        realisasi_pct = float(row["Realisasi (%)"])
-        span = w_end - w_start + 1
-
-        week_vals = [0.0] * max_week
-        if span > 0 and bobot > 0 and realisasi_pct > 0:
-            ts = np.linspace(0, 1, span + 1)
-            s_vals = np.array([sigmoid_kernel(t, k=4.0) for t in ts])
-            weekly_plan = np.diff(s_vals) * bobot
-            if weekly_plan.sum() > 0:
-                weekly_plan = weekly_plan / weekly_plan.sum() * bobot
-            weekly_actual_full = weekly_plan * (realisasi_pct / 100.0)
-            w_cut = min(current_week, w_end)
-            if w_cut >= w_start:
-                for i, w in enumerate(range(w_start, w_cut + 1)):
-                    week_vals[w - 1] = round(float(weekly_actual_full[i]), 2)
-        distrib_actual.append(week_vals)
-
-    total_actual_per_week = np.sum(distrib_actual, axis=0).round(2)
-    cum_actual = np.cumsum(total_actual_per_week).round(2)
-
-    st.markdown("### Tabel S-Curve Mingguan")
-
-    header_cells = (
-        "<th style='text-align:left;'>No</th>"
-        "<th style='text-align:left;'>Uraian Pekerjaan</th>"
-        "<th>Harga</th><th>Bobot</th>"
-    )
-    for w in weeks:
-        header_cells += f"<th>M{w}</th>"
-
-    body_rows = ""
-    for i, row in wbs_edited.iterrows():
-        body_rows += "<tr>"
-        body_rows += f"<td class='text-left'>{html.escape(str(row['No']))}</td>"
-        body_rows += f"<td class='text-left'>{html.escape(str(row['Item Pekerjaan']))}</td>"
-        body_rows += f"<td>Rp {row['Harga (juta Rp)']:,.0f}</td>"
-        body_rows += f"<td>{row['Bobot (%)']:.2f}%</td>"
-        for w_idx in range(max_week):
-            val = distrib_matrix[i][w_idx]
-            body_rows += f"<td>{val:.2f}%</td>" if val > 0 else "<td>-</td>"
-        body_rows += "</tr>"
-
-    body_rows += "<tr class='total-row'><td class='text-left'></td><td class='text-left'>Total</td>"
-    body_rows += f"<td>Rp {total_harga:,.0f}</td>"
-    body_rows += "<td>100.00%</td>" if total_harga > 0 else "<td>0.00%</td>"
-    for val in total_per_week:
-        body_rows += f"<td>{val:.2f}%</td>" if val > 0 else "<td>-</td>"
-    body_rows += "</tr>"
-
-    body_rows += "<tr class='cum-row'><td class='text-left'></td><td class='text-left'>Progress Rencana Kumulatif</td><td></td><td></td>"
-    for val in cum_plan:
-        body_rows += f"<td>{val:.2f}%</td>"
-    body_rows += "</tr>"
-
-    body_rows += "<tr><td class='text-left'></td><td class='text-left'>Total Realisasi per Minggu</td><td></td><td></td>"
-    for val in total_actual_per_week:
-        body_rows += f"<td>{val:.2f}%</td>" if val > 0 else "<td>-</td>"
-    body_rows += "</tr>"
-
-    body_rows += "<tr class='actual-cum-row'><td class='text-left'></td><td class='text-left'>Progress Realisasi Kumulatif</td><td></td><td></td>"
-    for val in cum_actual:
-        body_rows += f"<td>{val:.2f}%</td>"
-    body_rows += "</tr>"
-
-    table_html = f"""
-    <div style='overflow-x:auto;'>
-        <table class='sc-table'>
-            <thead><tr>{header_cells}</tr></thead>
-            <tbody>{body_rows}</tbody>
-        </table>
-    </div>
-    """
-    st.markdown(table_html, unsafe_allow_html=True)
-
-    st.markdown("### Grafik S-Curve")
-
-    fig, ax = plt.subplots(figsize=(13, 5.5))
-    ax.fill_between(weeks, cum_plan, cum_actual, where=(cum_actual < cum_plan),
-                    color="#dc2626", alpha=0.12, label="Deviasi negatif")
-    ax.fill_between(weeks, cum_plan, cum_actual, where=(cum_actual >= cum_plan),
-                    color="#047857", alpha=0.12, label="Deviasi positif")
-    ax.plot(weeks, cum_plan, color="#1e40af", linewidth=2.5, marker="o", markersize=6, label="Rencana (S-Curve)")
-    ax.plot(weeks, cum_actual, color="#dc2626", linewidth=2.5, marker="s", markersize=6, label="Realisasi")
-    ax.axvline(current_week, linestyle=":", color="#6b7280", linewidth=1.5, label=f"Minggu ini (M{current_week})")
-
-    plan_now = float(cum_plan[current_week - 1])
-    actual_now = float(cum_actual[current_week - 1])
-
-    ax.scatter([current_week], [plan_now], color="#1e40af", s=100, zorder=5, edgecolor="white", linewidth=2)
-    ax.scatter([current_week], [actual_now], color="#dc2626", s=100, marker="D", zorder=5, edgecolor="white", linewidth=2)
-    ax.annotate(f"Rencana: {plan_now:.2f}%", xy=(current_week, plan_now), xytext=(10, 10),
-                textcoords="offset points", color="#1e40af", fontsize=9, fontweight="600")
-    ax.annotate(f"Realisasi: {actual_now:.2f}%", xy=(current_week, actual_now), xytext=(10, -20),
-                textcoords="offset points", color="#dc2626", fontsize=9, fontweight="600")
-
-    ax.set_xlabel("Minggu ke-", fontsize=10)
-    ax.set_ylabel("Progress Kumulatif (%)", fontsize=10)
-    ax.set_title(f"S-Curve — {selected_vendor}", fontsize=12, fontweight="600")
-    ax.set_ylim(0, 105)
-    ax.set_xlim(1, max(max_week, 2))
-    ax.set_xticks(weeks)
-    ax.tick_params(labelsize=9)
-    ax.legend(fontsize=9, loc="lower right")
-    ax.grid(alpha=0.25)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    st.pyplot(fig)
-    plt.close(fig)
-
-    deviasi = actual_now - plan_now
-    spi = actual_now / plan_now if plan_now > 0 else 0.0
-
-    sc1, sc2, sc3, sc4 = st.columns(4)
-    sc1.metric(f"Rencana (M{current_week})", f"{plan_now:.2f}%")
-    sc2.metric(f"Realisasi (M{current_week})", f"{actual_now:.2f}%")
-    sc3.metric("Deviasi", f"{deviasi:+.2f}%")
-    sc4.metric("SPI", f"{spi:.3f}")
-
-    if deviasi < -5:
-        st.error(f"Deviasi {deviasi:.2f}% — berpotensi terlambat.")
-    elif deviasi < 0:
-        st.warning(f"Deviasi {deviasi:.2f}% — perlu perhatian.")
-    else:
-        st.success(f"Progress sesuai/lebih cepat {deviasi:+.2f}%.")
-
-    with st.expander("Unduh Data S-Curve"):
-        cols = ["No", "Uraian Pekerjaan", "Harga (juta Rp)", "Bobot (%)"] + [f"M{w}" for w in weeks]
-        rows_export = []
-        for i, row in wbs_edited.iterrows():
-            r = [row["No"], row["Item Pekerjaan"], row["Harga (juta Rp)"], row["Bobot (%)"]]
-            r += distrib_matrix[i]
-            rows_export.append(r)
-        rows_export.append(["", "Total", total_harga, 100.00 if total_harga > 0 else 0.0] + list(total_per_week))
-        rows_export.append(["", "Progress Rencana Kumulatif", "", ""] + list(cum_plan))
-        rows_export.append(["", "Total Realisasi per Minggu", "", ""] + list(total_actual_per_week))
-        rows_export.append(["", "Progress Realisasi Kumulatif", "", ""] + list(cum_actual))
-
-        df_export = pd.DataFrame(rows_export, columns=cols)
-        st.dataframe(df_export, use_container_width=True, hide_index=True)
-        st.download_button(
-            "Unduh S-Curve (CSV)",
-            data=df_export.to_csv(index=False).encode("utf-8-sig"),
-            file_name=f"s_curve_{meta['name'].replace(' ', '_')}.csv",
-            mime="text/csv",
+        gc_types = ["xlsx", "xls", "csv"] if HAS_OPENPYXL else ["csv"]
+        gc_file = st.file_uploader(
+            "Upload S-Curve (" + " / ".join("." + t for t in gc_types) + ")",
+            type=gc_types, key=f"sc_chart_upload_{pid}",
         )
+        if gc_file is not None:
+            chart_bytes, chart_name = gc_file.getvalue(), gc_file.name
+
+    if chart_bytes is not None:
+        if st.button("Buat / Perbarui Grafik dari File Ini", type="primary", key=f"sc_make_{pid}"):
+            try:
+                res = parse_scurve_chart(chart_bytes, chart_name)
+                res["filename"] = chart_name
+                active["scurve_chart"] = res
+                st.success("Grafik berhasil dibuat dari file.")
+            except Exception as e:
+                st.error(f"Gagal membuat grafik: {e}")
+
+    chart = active.get("scurve_chart")
+    current_week = 0
+    plan_now = actual_now = deviasi = spi = 0.0
+    weeks = []
+
+    if not chart:
+        st.info("Belum ada grafik. Pilih sumber file lalu klik tombol \"Buat / Perbarui Grafik\".")
+    else:
+        weeks = [int(w) for w in chart["weeks"]]
+        plan = np.array([np.nan if v is None else float(v) for v in chart["plan"]])
+        if chart.get("actual"):
+            actual = np.array([np.nan if v is None else float(v) for v in chart["actual"]])
+        else:
+            actual = np.full(len(weeks), np.nan)
+        has_actual = bool(np.isfinite(actual).any())
+        x = np.array(weeks)
+
+        st.caption(f"Sumber grafik: {chart.get('filename', '-')} · sheet {chart.get('sheet', '-')} · "
+                   f"{len(weeks)} minggu")
+
+        if has_actual:
+            default_week = weeks[int(np.where(np.isfinite(actual))[0][-1])]
+        else:
+            default_week = weeks[min(len(weeks) - 1, int(len(weeks) * 0.6))]
+        chart_sig = hashlib.md5(json.dumps(chart, sort_keys=True, default=str).encode()).hexdigest()[:8]
+        current_week = int(st.number_input(
+            "Minggu saat ini", min_value=weeks[0], max_value=weeks[-1],
+            value=int(default_week), step=1, key=f"current_week_{pid}_{chart_sig}",
+        ))
+        idx = int(np.argmin([abs(w - current_week) for w in weeks]))
+
+        plan_now = float(plan[idx])
+        if has_actual:
+            fin = np.where(np.isfinite(actual[:idx + 1]))[0]
+            actual_now = float(actual[fin[-1]]) if len(fin) else 0.0
+        else:
+            actual_now = 0.0
+
+        st.markdown("### Grafik S-Curve")
+        fig, ax = plt.subplots(figsize=(13, 5.5))
+        valid = np.isfinite(actual)
+        if has_actual and valid.sum() >= 2:
+            ax.fill_between(x[valid], plan[valid], actual[valid], where=(actual[valid] < plan[valid]),
+                            color="#dc2626", alpha=0.12, label="Deviasi negatif")
+            ax.fill_between(x[valid], plan[valid], actual[valid], where=(actual[valid] >= plan[valid]),
+                            color="#047857", alpha=0.12, label="Deviasi positif")
+        ax.plot(x, plan, color="#1e40af", linewidth=2.5, marker="o", markersize=6, label="Rencana (S-Curve)")
+        if has_actual:
+            ax.plot(x, actual, color="#dc2626", linewidth=2.5, marker="s", markersize=6, label="Realisasi")
+        ax.axvline(weeks[idx], linestyle=":", color="#6b7280", linewidth=1.5, label=f"Minggu ini (M{weeks[idx]})")
+
+        ax.scatter([weeks[idx]], [plan_now], color="#1e40af", s=100, zorder=5, edgecolor="white", linewidth=2)
+        ax.annotate(f"Rencana: {plan_now:.2f}%", xy=(weeks[idx], plan_now), xytext=(10, 10),
+                    textcoords="offset points", color="#1e40af", fontsize=9, fontweight="600")
+        if has_actual and np.isfinite(actual[idx]):
+            ax.scatter([weeks[idx]], [actual_now], color="#dc2626", s=100, marker="D", zorder=5,
+                       edgecolor="white", linewidth=2)
+            ax.annotate(f"Realisasi: {actual_now:.2f}%", xy=(weeks[idx], actual_now), xytext=(10, -20),
+                        textcoords="offset points", color="#dc2626", fontsize=9, fontweight="600")
+
+        ax.set_xlabel("Minggu ke-", fontsize=10)
+        ax.set_ylabel("Progress Kumulatif (%)", fontsize=10)
+        ax.set_title(f"S-Curve — {selected_vendor}", fontsize=12, fontweight="600")
+        ax.set_ylim(0, 105)
+        ax.set_xlim(weeks[0], max(weeks[-1], weeks[0] + 1))
+        ax.set_xticks(x[::max(1, len(x) // 20)])
+        ax.tick_params(labelsize=9)
+        ax.legend(fontsize=9, loc="lower right")
+        ax.grid(alpha=0.25)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        st.pyplot(fig)
+        plt.close(fig)
+
+        sc1, sc2, sc3, sc4 = st.columns(4)
+        sc1.metric(f"Rencana (M{weeks[idx]})", f"{plan_now:.2f}%")
+        if has_actual:
+            deviasi = actual_now - plan_now
+            spi = actual_now / plan_now if plan_now > 0 else 0.0
+            sc2.metric(f"Realisasi (M{weeks[idx]})", f"{actual_now:.2f}%")
+            sc3.metric("Deviasi", f"{deviasi:+.2f}%")
+            sc4.metric("SPI", f"{spi:.3f}")
+            if deviasi < -5:
+                st.error(f"Deviasi {deviasi:.2f}% — berpotensi terlambat.")
+            elif deviasi < 0:
+                st.warning(f"Deviasi {deviasi:.2f}% — perlu perhatian.")
+            else:
+                st.success(f"Progress sesuai/lebih cepat {deviasi:+.2f}%.")
+        else:
+            sc2.metric(f"Realisasi (M{weeks[idx]})", "-")
+            sc3.metric("Deviasi", "-")
+            sc4.metric("SPI", "-")
+            st.info("File ini tidak memiliki baris realisasi, jadi hanya kurva rencana yang digambar.")
 
     st.markdown("---")
 
@@ -2384,10 +2456,13 @@ elif step == 3:
     pcm_valid = len(pcm_notes.strip()) >= 10
     kendala_valid = kendala != "Pilih kendala..."
     kpi_valid = kpi > 0
-    form_valid = pcm_valid and kendala_valid and aksi_valid and kpi_valid
+    sc_ok = bool(chart)
+    form_valid = sc_ok and pcm_valid and kendala_valid and aksi_valid and kpi_valid
 
     if not form_valid:
         missing = []
+        if not sc_ok:
+            missing.append("grafik S-Curve belum dibuat")
         if not pcm_valid:
             missing.append("catatan PCM min 10 karakter")
         if not kendala_valid:
@@ -2415,7 +2490,8 @@ elif step == 3:
                 "kendala": kendala,
                 "aksi": aksi,
                 "kpi": kpi,
-                "wbs_count": len(wbs_edited),
+                "weeks_count": len(weeks),
+                "source_file": (chart or {}).get("filename", ""),
             }
             live_data["site_execution"] = payload
             st.success("Site Execution tersimpan. Lanjut ke Quality Control...")
