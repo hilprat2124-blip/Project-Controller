@@ -1139,6 +1139,61 @@ def live_penawaran(pid, invited):
 
 
 # =========================================================
+# LIVE: RANKING PENAWARAN (urut harga terendah, auto-refresh)
+# =========================================================
+@st.fragment(run_every=3)
+def live_ranking(pid, invited, budget):
+    pen = fetch_penawaran(pid)
+    data = []
+    for v in invited:
+        em = (v.get("Email") or "").lower()
+        r = pen.get(em) if em else None
+        harga_v = float(r["harga_rab"]) if r and r.get("harga_rab") else 0.0
+        data.append({
+            "Vendor": v["Vendor"],
+            "harga": harga_v,
+            "durasi": int(r["durasi"]) if r and r.get("durasi") else 0,
+            "updated": r.get("updated_at") if r else None,
+        })
+
+    sudah = sorted([d for d in data if d["harga"] > 0],
+                   key=lambda d: (d["harga"], d["durasi"]))
+    belum = [d for d in data if d["harga"] <= 0]
+
+    rows = []
+    low = sudah[0]["harga"] if sudah else 0.0
+    for i, d in enumerate(sudah, start=1):
+        if d["harga"] > budget:
+            status = "Melebihi budget"
+        elif i == 1:
+            status = "Terendah"
+        else:
+            status = "Dalam budget"
+        rows.append({
+            "Peringkat": i,
+            "Vendor": d["Vendor"],
+            "Penawaran": format_rupiah(d["harga"]),
+            "Selisih dari terendah": "-" if i == 1 else f"+{format_rupiah(d['harga'] - low)}",
+            "Durasi (hari)": d["durasi"],
+            "Status": status,
+            "Update terakhir": fmt_ts(d["updated"]),
+        })
+    for d in belum:
+        rows.append({
+            "Peringkat": None,
+            "Vendor": d["Vendor"],
+            "Penawaran": "-",
+            "Selisih dari terendah": "-",
+            "Durasi (hari)": None,
+            "Status": "Belum mengirim",
+            "Update terakhir": "-",
+        })
+
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.caption(f"Diurutkan otomatis dari harga terendah · diperbarui {datetime.now():%H:%M:%S}")
+
+
+# =========================================================
 # SIDEBAR
 # =========================================================
 with st.sidebar:
@@ -1749,13 +1804,8 @@ elif step == 2:
         else:
             st.caption("Optimasi memilih vendor dengan **penawaran harga terendah** yang masih dalam budget.")
 
-            st.markdown("#### Data untuk Optimasi")
-            rows = [{
-                "Vendor": v["Vendor"],
-                "Penawaran (juta Rp)": format_rupiah(harga[v["Vendor"]]),
-                "Durasi (hari)": durasi_map[v["Vendor"]],
-            } for v in invited]
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.markdown("#### Data untuk Optimasi (Ranking Penawaran)")
+            live_ranking(pid, invited, budget)
 
             eligible = [n for n in invited_names if harga[n] > 0 and harga[n] <= budget]
 
