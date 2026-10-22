@@ -319,16 +319,46 @@ def _to_number(v):
         return None
 
 
-def _clean_volume(v):
+def _id_number(n, decimals):
+    """Format angka gaya Indonesia: 1.234,50"""
+    s = f"{n:,.{decimals}f}"
+    return s.replace(",", "\x00").replace(".", ",").replace("\x00", ".")
+
+
+def _fmt_volume(v):
+    """Volume ditampilkan seperti di Excel: 88,00 / 129,40 / 1,00.
+    Teks non-angka (mis. 'Ls') dibiarkan apa adanya."""
     s = _cell(v)
     if not s or s in ("-", "–", "—"):
         return ""
-    num = _to_number(s)
-    if num is None:
+    if not re.fullmatch(r"[\s\d\.,\-]+", s):
         return s
-    if num == int(num):
-        return str(int(num))
-    return str(round(num, 4))
+    n = _to_number(s)
+    if n is None:
+        return s
+    return _id_number(round(n, 2), 2)
+
+
+def _fmt_price(v):
+    """Harga: '-' jika kosong/nol (sama seperti Excel), selain itu 1.234.567"""
+    if isinstance(v, (int, float, np.integer, np.floating)) and not isinstance(v, bool):
+        try:
+            n = None if pd.isna(v) else float(v)
+        except (TypeError, ValueError):
+            n = None
+    else:
+        s = _cell(v)
+        if not s or s in ("-", "–", "—"):
+            return "-"
+        if re.fullmatch(r"\d{1,3}(\.\d{3})+(,\d+)?", s):   # sudah format Indonesia
+            n = float(s.replace(".", "").replace(",", "."))
+        else:
+            n = _to_number(s)
+    if n is None or n == 0:
+        return "-"
+    if abs(n - round(n)) < 0.005:
+        return _id_number(round(n), 0)
+    return _id_number(n, 2)
 
 
 def _clean_no(v):
@@ -343,7 +373,7 @@ _PRICE_WORDS = {"harga", "jumlah", "total", "price", "amount", "biaya",
 _VOLUME_WORDS = {"volume", "vol", "qty", "kuantitas", "quantity"}
 _UNIT_WORDS = {"satuan", "sat", "unit", "uom"}
 _SPEC_WORDS = {"spesifikasi", "spek", "specification", "specifications",
-               "spesification", "spec"}
+               "spesification", "spesifications", "spec"}
 _ITEM_WORDS = {"uraian", "deskripsi", "description", "pekerjaan"}
 _ITEM_WEAK_WORDS = {"item", "nama"}
 _NO_WORDS = {"no", "nomor"}
@@ -418,47 +448,64 @@ def _find_header(df_raw, max_scan=80):
     return None
 
 
-_SKIP_ROW = re.compile(
-    r"^(sub\s*total|grand\s*total|total|jumlah|ppn|pph|pajak|rekapitulasi|rekap|dibulatkan|terbilang)\b"
-)
+def _column_spans(mapping, ncols):
+    """Tiap kolom standar membaca SEMUA sel dari kolomnya sampai sebelum kolom
+    standar berikutnya. Dengan begitu teks yang ada di sel merge / kolom bantu
+    (mis. item pekerjaan yang menjorok di kolom sebelah) tetap terbaca."""
+    cols = sorted(set(mapping.values()))
+    spans = {}
+    for name, j in mapping.items():
+        nxt = [c for c in cols if c > j]
+        end = nxt[0] if nxt else ncols
+        spans[name] = list(range(j, max(end, j + 1)))
+    return spans
 
 
 def _extract_items(df_raw):
+    """Ambil SEMUA baris BOQ apa adanya (judul BAB, sub-judul, item, subtotal),
+    mengikuti urutan dan isi file Excel."""
     found = _find_header(df_raw)
     if found is None:
         return []
     header_idx, nrows, mapping = found
     data = df_raw.iloc[header_idx + nrows:].values
     ncols = data.shape[1] if data.ndim == 2 else 0
+    spans = _column_spans(mapping, ncols)
 
-    def raw(row, name):
-        j = mapping.get(name)
-        if j is None or j >= ncols:
-            return ""
-        return row[j]
+    def pick(row, name):
+        for j in spans.get(name, []):
+            if j < ncols and _cell(row[j]):
+                return row[j]
+        return ""
 
     items = []
     for row in data:
-        desc = re.sub(r"\s+", " ", _cell(raw(row, "Description")))
-        if not desc:
+        no = _clean_no(pick(row, "No"))
+        desc = re.sub(r"\s+", " ", _cell(pick(row, "Description")))
+        spec = re.sub(r"\s+", " ", _cell(pick(row, "Specification")))
+        volume = _fmt_volume(pick(row, "Volume"))
+        unit = _cell(pick(row, "Unit"))
+        unit_price = _fmt_price(pick(row, "UnitPrice"))
+        total_price = _fmt_price(pick(row, "TotalPrice"))
+
+        # baris kosong / sisa baris header (mis. "(Rp.)") dilewati
+        if not any([no, desc, spec, volume, unit]):
             continue
-        if re.fullmatch(r"[\d\.\s,]+", desc):  # hanya angka -> bukan nama pekerjaan
+        # header yang diulang di tengah tabel (pindah halaman) dilewati
+        if not volume and len(_build_mapping(list(row))) >= 3:
             continue
-        volume = _clean_volume(raw(row, "Volume"))
-        no = _clean_no(raw(row, "No"))
-        if not volume and _SKIP_ROW.match(desc.lower()):
+        # baris penomoran kolom (1 2 3 4 ...) dilewati
+        if desc and re.fullmatch(r"[\d\.\s,]+", desc) and not volume and not unit:
             continue
-        # baris tanpa volume hanya dipertahankan jika berupa judul bagian
-        if not volume and not no and not desc.isupper():
-            continue
+
         items.append({
             "No": no,
             "Description": desc,
-            "Specification": re.sub(r"\s+", " ", _cell(raw(row, "Specification"))),
+            "Specification": spec,
             "Volume": volume,
-            "Unit": _cell(raw(row, "Unit")),
-            "Unit Price (Rp)": _to_number(raw(row, "UnitPrice")),
-            "Total Price (Rp)": _to_number(raw(row, "TotalPrice")),
+            "Unit": unit,
+            "Unit Price (Rp)": unit_price,
+            "Total Price (Rp)": total_price,
         })
     return items
 
@@ -477,11 +524,11 @@ def _normalize_items(records):
         row = {}
         for c in BOQ_COLUMNS:
             if c in BOQ_NUM_COLS:
-                row[c] = _to_number(d.get(c))
+                row[c] = _fmt_price(d.get(c))
             elif c == "No":
                 row[c] = _clean_no(d.get(c))
             elif c == "Volume":
-                row[c] = _clean_volume(d.get(c))
+                row[c] = _fmt_volume(d.get(c))
             else:
                 row[c] = _cell(d.get(c))
         out.append(row)
@@ -490,16 +537,24 @@ def _normalize_items(records):
 
 def _sample_boq_rows():
     """Contoh baris BOQ dengan struktur sama seperti file Excel BOQ."""
+    def r(no, desc, spec="", vol="", unit=""):
+        return {"No": no, "Description": desc, "Specification": spec,
+                "Volume": vol, "Unit": unit,
+                "Unit Price (Rp)": "-", "Total Price (Rp)": "-"}
     return [
-        {"No": "II.1.A", "Description": "PEKERJAAN PERSIAPAN", "Specification": "",
-         "Volume": "", "Unit": "", "Unit Price (Rp)": None, "Total Price (Rp)": None},
-        {"No": "1", "Description": "Pek. Bouwplank", "Specification": "",
-         "Volume": "88", "Unit": "m'", "Unit Price (Rp)": None, "Total Price (Rp)": None},
-        {"No": "2", "Description": "Pek. Clearing area; termasuk bongkar dan pemindahan Kontainer eksisting",
-         "Specification": "termasuk pemindahan furniture ke ruangan sementara",
-         "Volume": "315", "Unit": "m2", "Unit Price (Rp)": None, "Total Price (Rp)": None},
-        {"No": "3", "Description": "Pek. Bongkaran Dinding Eksisting", "Specification": "",
-         "Volume": "129.4", "Unit": "m2", "Unit Price (Rp)": None, "Total Price (Rp)": None},
+        r("BAB. II", "BANGUNAN OFFICE"),
+        r("II.1", "PEKERJAAN STRUKTUR"),
+        r("II.1.A", "PEKERJAAN PERSIAPAN"),
+        r("1", "Pek. Bouwplank", "", "88,00", "m'"),
+        r("2", "Pek. Clearing area; termasuk bongkar dan pemindahan Kontainer eksisting",
+          "termasuk pemindahan furniture ke ruangan sementara", "315,00", "m2"),
+        r("3", "Pek. Bongkaran Dinding Eksisting", "", "129,40", "m2"),
+        r("4", "Pek. Bongkaran Kloset & Wastafel Eksisting", "", "7,00", "unit"),
+        r("5", "Pek. Bobokan Slab Eksisting untuk install Footplate & Tiebeam Baru", "", "1,00", "Ls"),
+        r("6", "Pek. Bongkar Keramik Eksisting", "", "246,77", "m2"),
+        r("7", "Pek. Bongkar Plafond Eksisting", "", "246,20", "m2"),
+        r("8", "Pek. Bongkar Rangka Atap Eksisting", "", "266,30", "m2"),
+        r("9", "Pek. Buang Puing Ex Bongkaran", "", "1,00", "Ls"),
     ]
 
 
@@ -656,11 +711,11 @@ def boq_template_bytes():
         rows.append({
             "NO": r["No"],
             "DESCRIPTION": r["Description"],
-            "SPECIFICATION": r["Specification"],
+            "SPESIFICATION": r["Specification"],
             "VOLUME": vol,
             "UNIT": r["Unit"],
-            "UNIT PRICE (Rp)": r["Unit Price (Rp)"],
-            "TOTAL PRICE (Rp)": r["Total Price (Rp)"],
+            "UNIT PRICE (Rp.)": None,
+            "TOTAL PRICE (Rp.)": None,
         })
     df = pd.DataFrame(rows)
 
@@ -1139,8 +1194,12 @@ if step == 1:
             if up_file is not None:
                 try:
                     parsed = parse_boq_excel(up_file)
-                    st.success(f"Terbaca {len(parsed)} item. Preview:")
-                    st.dataframe(pd.DataFrame(parsed), use_container_width=True, hide_index=True)
+                    n_vol = sum(1 for it in parsed if it["Volume"])
+                    st.success(
+                        f"Terbaca {len(parsed)} baris ({n_vol} item dengan volume). Preview:"
+                    )
+                    st.dataframe(pd.DataFrame(parsed, columns=BOQ_COLUMNS),
+                                 use_container_width=True, hide_index=True, height=420)
 
                     mode = st.radio(
                         "Mode impor",
@@ -1160,7 +1219,7 @@ if step == 1:
 
         st.caption(
             "📝 **Tabel ini bisa diedit langsung** — tambah baris, hapus, ubah nama item, "
-            "volume, satuan, spesifikasi, dan kompleksitas."
+            "volume, satuan, dan spesifikasi. Isi tabel mengikuti file Excel BOQ apa adanya."
         )
 
         active["items_data"] = _normalize_items(active["items_data"])
@@ -1170,21 +1229,20 @@ if step == 1:
             use_container_width=True,
             hide_index=True,
             num_rows="dynamic",
+            height=560,
             key=f"items_editor_{pid}_{active['items_ver']}",
             column_config={
                 "No": st.column_config.TextColumn("NO", width="small"),
                 "Description": st.column_config.TextColumn("DESCRIPTION", required=True, width="large"),
-                "Specification": st.column_config.TextColumn("SPECIFICATION", width="medium"),
+                "Specification": st.column_config.TextColumn("SPESIFICATION", width="medium"),
                 "Volume": st.column_config.TextColumn("VOLUME", width="small"),
                 "Unit": st.column_config.TextColumn("UNIT", width="small"),
-                "Unit Price (Rp)": st.column_config.NumberColumn(
-                    "UNIT PRICE (Rp)", min_value=0.0, format="%.0f", width="small"),
-                "Total Price (Rp)": st.column_config.NumberColumn(
-                    "TOTAL PRICE (Rp)", min_value=0.0, format="%.0f", width="small"),
+                "Unit Price (Rp)": st.column_config.TextColumn("UNIT PRICE (Rp.)", width="small"),
+                "Total Price (Rp)": st.column_config.TextColumn("TOTAL PRICE (Rp.)", width="small"),
             },
         )
         active["items_data"] = _normalize_items(items_edited.to_dict("records"))
-        st.caption(f"Total item: **{len(items_edited)}**")
+        st.caption(f"Total baris: **{len(items_edited)}**")
 
     dokumen_lengkap = all([doc_drawing, doc_rks, doc_spek, doc_boq, doc_k3])
     catatan_lengkap = len(catatan.strip()) >= 10
@@ -1263,8 +1321,10 @@ elif step == 2:
         if not items_data:
             st.warning("BOQ belum diisi. Kembali ke Tahap 1.")
         else:
-            st.dataframe(pd.DataFrame(_normalize_items(items_data), columns=BOQ_COLUMNS),
-                         use_container_width=True, hide_index=True)
+            boq_view = pd.DataFrame(_normalize_items(items_data), columns=BOQ_COLUMNS)
+            boq_view.columns = ["NO", "DESCRIPTION", "SPESIFICATION", "VOLUME", "UNIT",
+                                "UNIT PRICE (Rp.)", "TOTAL PRICE (Rp.)"]
+            st.dataframe(boq_view, use_container_width=True, hide_index=True, height=480)
 
         st.markdown("---")
         st.markdown("### Vendor yang Diundang")
