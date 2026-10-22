@@ -1111,10 +1111,6 @@ def vendor_page(email):
                     f"Durasi project {pub.get('deadline')} hari (maksimal minggu ke-{max_week}). "
                     f"File yang Anda upload akan langsung diteruskan ke KPDP apa adanya.")
 
-            tpl_bytes, tpl_name, tpl_mime = scurve_template_bytes(max_week)
-            st.download_button("Unduh Contoh Template S-Curve", data=tpl_bytes,
-                               file_name=tpl_name, mime=tpl_mime, key=f"tpl_sc_{pid_sel}")
-
             sc_cur = fetch_scurve(pid_sel, email)
             if sc_cur:
                 st.success(f"S-Curve terakhir diupload: {fmt_ts(sc_cur.get('uploaded_at'))} · "
