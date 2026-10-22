@@ -392,12 +392,16 @@ def parse_boq_excel(file):
 
     # Iterasi setiap sheet
     for sheet_name, df_raw in sheets.items():
+        if df_raw.empty:
+            continue
+
         # 1. Deteksi Baris Header
         header_idx = None
         for i, row in df_raw.iterrows():
+            # Ubah semua nilai baris menjadi string huruf kecil, abaikan yang kosong
             row_str = [str(x).strip().lower() for x in row.values if pd.notna(x)]
             
-            # Cari baris yang memiliki 'volume' DAN 'satuan'/'unit' DAN 'uraian'/'deskripsi'/'pekerjaan'
+            # Cari baris yang memiliki 'volume' DAN ('satuan'/'unit') DAN ('uraian'/'deskripsi'/'pekerjaan')
             has_vol = any("volume" in s or "vol" in s for s in row_str)
             has_unit = any("satuan" in s or "unit" in s for s in row_str)
             has_desc = any("uraian" in s or "deskripsi" in s or "description" in s or "pekerjaan" in s for s in row_str)
@@ -406,15 +410,37 @@ def parse_boq_excel(file):
                 header_idx = i
                 break
                 
-        # Jika header tidak ditemukan di sheet ini, lewati sheet ini
+        # Jika header tidak ditemukan di sheet ini, lewati
         if header_idx is None:
             continue
             
-        # Set header ke baris yang terdeteksi
+        # Set header ke baris yang terdeteksi (paksa jadi list of string)
         df = df_raw.iloc[header_idx + 1:].copy()
-        df.columns = [str(c).strip() for c in df_raw.iloc[header_idx].values]
+        raw_cols = df_raw.iloc[header_idx].values
         
-        # 2. Samakan nama kolom (case-insensitive + alias)
+        # Bersihkan nama kolom dari float/int (misal: 1.0 -> "1", NaN -> "Unnamed")
+        clean_cols = []
+        for c in raw_cols:
+            if pd.isna(c):
+                clean_cols.append("Unnamed")
+            else:
+                clean_cols.append(str(c).strip())
+                
+        # Tangani duplikat nama kolom dengan menambahkan suffix
+        final_cols = []
+        seen = set()
+        for c in clean_cols:
+            base_c = c
+            counter = 1
+            while c in seen:
+                c = f"{base_c}_{counter}"
+                counter += 1
+            seen.add(c)
+            final_cols.append(c)
+            
+        df.columns = final_cols
+
+        # 2. Samakan nama kolom menggunakan alias
         rename = {}
         for c in df.columns:
             key = str(c).strip().lower()
@@ -428,15 +454,24 @@ def parse_boq_excel(file):
                         
         df = df.rename(columns=rename)
 
-        # 3. Validasi kolom wajib
+        # 3. Validasi kolom wajib (Item Pekerjaan)
         if "Item Pekerjaan" not in df.columns:
-            # Fallback: cari kolom yang isinya paling banyak teks (kemungkinan nama pekerjaan)
+            # Fallback: cari kolom teks terpanjang (kemungkinan nama pekerjaan)
+            best_col = None
+            max_len = 0
             for c in df.columns:
-                if df[c].dtype == object and df[c].dropna().astype(str).str.len().mean() > 10:
-                    df = df.rename(columns={c: "Item Pekerjaan"})
-                    break
+                # Hitung rata-rata panjang teks di kolom ini
+                try:
+                    avg_len = df[c].dropna().astype(str).str.len().mean()
+                    if pd.notna(avg_len) and avg_len > max_len:
+                        max_len = avg_len
+                        best_col = c
+                except Exception:
+                    pass
             
-            if "Item Pekerjaan" not in df.columns:
+            if best_col and max_len > 5:
+                df = df.rename(columns={best_col: "Item Pekerjaan"})
+            else:
                 continue # Jika tetap tidak ada, lewati sheet ini
 
         # Pastikan semua kolom standar ada
@@ -445,13 +480,15 @@ def parse_boq_excel(file):
                 df[col] = ""
 
         # 4. Bersihkan data
-        df = df.dropna(subset=["Item Pekerjaan", "Volume"], how="all")
+        # Ganti NaN dengan string kosong
+        for col in BOQ_COLUMNS:
+            df[col] = df[col].fillna("").astype(str).str.strip()
+            
+        # Hapus baris yang kosong melompong (tidak ada item DAN tidak ada volume)
+        df = df[~((df["Item Pekerjaan"] == "") & (df["Volume"] == ""))]
         
-        # Isi NaN dengan string kosong dan rapikan
-        df["Item Pekerjaan"] = df["Item Pekerjaan"].fillna("").astype(str).str.strip()
-        df["Spesifikasi"] = df["Spesifikasi"].fillna("").astype(str).str.strip()
+        # Format Volume
         df["Volume"] = df["Volume"].apply(_clean_volume)
-        df["Satuan"] = df["Satuan"].fillna("").astype(str).str.strip().replace("nan", "")
         
         # Filter: Hanya ambil baris yang memiliki nama pekerjaan
         df = df[df["Item Pekerjaan"].str.len() > 0]
@@ -464,7 +501,10 @@ def parse_boq_excel(file):
             all_parsed_items.extend(df.to_dict("records"))
 
     if not all_parsed_items:
-        raise ValueError("Tidak ada data BOQ yang bisa dibaca. Pastikan file memiliki tabel dengan kolom Uraian/Deskripsi, Volume, dan Satuan.")
+        raise ValueError(
+            "Tidak ada data BOQ yang bisa dibaca. Pastikan file memiliki baris Header "
+            "yang mengandung kata 'Uraian/Deskripsi', 'Volume', dan 'Satuan'."
+        )
 
     # 5. Penomoran Ulang untuk semua item
     for i, item in enumerate(all_parsed_items, start=1):
@@ -671,8 +711,7 @@ PERFORMANCE_ASPECTS = [
 
 # =========================================================
 # SIDEBAR
-# =========================================================
-with st.sidebar:
+# =========================================================with st.sidebar:
     st.markdown("### Project Manager")
 
     if st.session_state.projects:
