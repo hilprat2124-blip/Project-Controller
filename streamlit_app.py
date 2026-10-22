@@ -1049,26 +1049,21 @@ def _extract_curve_daily(df_raw, found):
             actual_cum = actual_cum_full[:last_act + 1]
 
     factor = 100.0 if max(plan_cum) <= 1.5 else 1.0
-    nweeks = (ndays + 6) // 7
-    weeks, plan, actual = [], [], []
-    for w in range(1, nweeks + 1):
-        start = (w - 1) * 7
-        end = min(w * 7, ndays) - 1
-        weeks.append(w)
-        plan.append(round(plan_cum[end] * factor, 2))
-        if actual_cum is not None and last_act >= start:
-            actual.append(round(actual_cum[min(end, last_act)] * factor, 2))
-        else:
-            actual.append(None)
+    days = [d for _, d in day_cols]
+    plan = [round(v * factor, 2) for v in plan_cum]
+    actual = None
+    if actual_cum is not None:
+        actual = ([round(v * factor, 2) for v in actual_cum]
+                  + [None] * (ndays - len(actual_cum)))
 
     warning = ""
     if abs(plan[-1] - 100.0) > 2.0:
         warning = (f"Total rencana di akhir proyek terbaca {plan[-1]:.2f}% (seharusnya sekitar 100%). "
                    "Kemungkinan ada baris subtotal yang ikut terjumlah atau sebagian kolom hari tidak terbaca. "
                    "Periksa file / sheet yang dipilih.")
-    return {"weeks": weeks, "plan": plan,
-            "actual": actual if actual_cum is not None else None,
-            "mode": f"harian ({ndays} hari) dijumlah per minggu", "warning": warning}
+    return {"days": days, "weeks": list(range(1, (ndays + 6) // 7 + 1)),
+            "plan": plan, "actual": actual,
+            "mode": f"harian ({ndays} hari), sama seperti grafik di Excel", "warning": warning}
 
 
 def _extract_curve(df_raw):
@@ -2559,7 +2554,10 @@ elif step == 3:
     if not chart:
         st.info("Belum ada grafik. Pilih sumber file lalu klik tombol \"Buat / Perbarui Grafik\".")
     else:
-        weeks = [int(w) for w in chart["weeks"]]
+        is_daily = bool(chart.get("days"))
+        weeks = [int(v) for v in (chart["days"] if is_daily else chart["weeks"])]  # posisi sumbu-x
+        unit = "Hari" if is_daily else "Minggu"
+        us = "H" if is_daily else "M"
         plan = np.array([np.nan if v is None else float(v) for v in chart["plan"]])
         if chart.get("actual"):
             actual = np.array([np.nan if v is None else float(v) for v in chart["actual"]])
@@ -2569,7 +2567,7 @@ elif step == 3:
         x = np.array(weeks)
 
         st.caption(f"Sumber grafik: {chart.get('filename', '-')} · sheet {chart.get('sheet', '-')} · "
-                   f"{len(weeks)} minggu" + (f" · {chart['mode']}" if chart.get("mode") else ""))
+                   f"{len(weeks)} {unit.lower()}" + (f" · {chart['mode']}" if chart.get("mode") else ""))
         if chart.get("warning"):
             st.warning(chart["warning"])
 
@@ -2578,11 +2576,14 @@ elif step == 3:
         else:
             default_week = weeks[min(len(weeks) - 1, int(len(weeks) * 0.6))]
         chart_sig = hashlib.md5(json.dumps(chart, sort_keys=True, default=str).encode()).hexdigest()[:8]
-        current_week = int(st.number_input(
-            "Minggu saat ini", min_value=weeks[0], max_value=weeks[-1],
+        pos_now = int(st.number_input(
+            f"{unit} saat ini (default: {unit.lower()} terakhir yang ada realisasinya)",
+            min_value=weeks[0], max_value=weeks[-1],
             value=int(default_week), step=1, key=f"current_week_{pid}_{chart_sig}",
         ))
-        idx = int(np.argmin([abs(w - current_week) for w in weeks]))
+        idx = int(np.argmin([abs(w - pos_now) for w in weeks]))
+        current_week = (weeks[idx] + 6) // 7 if is_daily else weeks[idx]
+        lbl_now = f"{us}{weeks[idx]}" + (f" / Minggu {current_week}" if is_daily else "")
 
         plan_now = float(plan[idx])
         if has_actual:
@@ -2594,15 +2595,16 @@ elif step == 3:
         st.markdown("### Grafik S-Curve")
         fig, ax = plt.subplots(figsize=(13, 5.5))
         valid = np.isfinite(actual)
+        mk = 0 if is_daily else 6
         if has_actual and valid.sum() >= 2:
             ax.fill_between(x[valid], plan[valid], actual[valid], where=(actual[valid] < plan[valid]),
                             color="#dc2626", alpha=0.12, label="Deviasi negatif")
             ax.fill_between(x[valid], plan[valid], actual[valid], where=(actual[valid] >= plan[valid]),
                             color="#047857", alpha=0.12, label="Deviasi positif")
-        ax.plot(x, plan, color="#1e40af", linewidth=2.5, marker="o", markersize=6, label="Rencana (S-Curve)")
+        ax.plot(x, plan, color="#1e40af", linewidth=2.5, marker="o", markersize=mk, label="Rencana (S-Curve)")
         if has_actual:
-            ax.plot(x, actual, color="#dc2626", linewidth=2.5, marker="s", markersize=6, label="Realisasi")
-        ax.axvline(weeks[idx], linestyle=":", color="#6b7280", linewidth=1.5, label=f"Minggu ini (M{weeks[idx]})")
+            ax.plot(x, actual, color="#dc2626", linewidth=2.5, marker="s", markersize=mk, label="Realisasi")
+        ax.axvline(weeks[idx], linestyle=":", color="#6b7280", linewidth=1.5, label=f"Saat ini ({us}{weeks[idx]})")
 
         ax.scatter([weeks[idx]], [plan_now], color="#1e40af", s=100, zorder=5, edgecolor="white", linewidth=2)
         ax.annotate(f"Rencana: {plan_now:.2f}%", xy=(weeks[idx], plan_now), xytext=(10, 10),
@@ -2613,12 +2615,20 @@ elif step == 3:
             ax.annotate(f"Realisasi: {actual_now:.2f}%", xy=(weeks[idx], actual_now), xytext=(10, -20),
                         textcoords="offset points", color="#dc2626", fontsize=9, fontweight="600")
 
-        ax.set_xlabel("Minggu ke-", fontsize=10)
+        if is_daily:
+            wk_starts = [d for d in weeks if (d - 1) % 7 == 0]
+            for d in wk_starts[1:]:
+                ax.axvline(d, color="#9ca3af", linewidth=0.6, alpha=0.5)
+            ax.set_xticks(wk_starts)
+            ax.set_xticklabels([f"M{(d - 1) // 7 + 1}\nH{d}" for d in wk_starts])
+            ax.set_xlabel("Minggu ke- (H = hari ke-)", fontsize=10)
+        else:
+            ax.set_xticks(x[::max(1, len(x) // 20)])
+            ax.set_xlabel("Minggu ke-", fontsize=10)
         ax.set_ylabel("Progress Kumulatif (%)", fontsize=10)
         ax.set_title(f"S-Curve — {selected_vendor}", fontsize=12, fontweight="600")
         ax.set_ylim(0, 105)
         ax.set_xlim(weeks[0], max(weeks[-1], weeks[0] + 1))
-        ax.set_xticks(x[::max(1, len(x) // 20)])
         ax.tick_params(labelsize=9)
         ax.legend(fontsize=9, loc="lower right")
         ax.grid(alpha=0.25)
@@ -2628,11 +2638,11 @@ elif step == 3:
         plt.close(fig)
 
         sc1, sc2, sc3, sc4 = st.columns(4)
-        sc1.metric(f"Rencana (M{weeks[idx]})", f"{plan_now:.2f}%")
+        sc1.metric(f"Rencana ({lbl_now})", f"{plan_now:.2f}%")
         if has_actual:
             deviasi = actual_now - plan_now
             spi = actual_now / plan_now if plan_now > 0 else 0.0
-            sc2.metric(f"Realisasi (M{weeks[idx]})", f"{actual_now:.2f}%")
+            sc2.metric(f"Realisasi ({lbl_now})", f"{actual_now:.2f}%")
             sc3.metric("Deviasi", f"{deviasi:+.2f}%")
             sc4.metric("SPI", f"{spi:.3f}")
             if deviasi < -5:
@@ -2642,7 +2652,7 @@ elif step == 3:
             else:
                 st.success(f"Progress sesuai/lebih cepat {deviasi:+.2f}%.")
         else:
-            sc2.metric(f"Realisasi (M{weeks[idx]})", "-")
+            sc2.metric(f"Realisasi ({lbl_now})", "-")
             sc3.metric("Deviasi", "-")
             sc4.metric("SPI", "-")
             st.info("File ini tidak memiliki baris realisasi, jadi hanya kurva rencana yang digambar.")
@@ -2705,6 +2715,8 @@ elif step == 3:
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "vendor": selected_vendor,
                 "current_week": current_week,
+                "current_pos": int(weeks[idx]) if weeks else 0,
+                "current_unit": "hari" if (chart or {}).get("days") else "minggu",
                 "plan_pct": float(plan_now),
                 "actual_pct": float(actual_now),
                 "deviation_pct": float(deviasi),
