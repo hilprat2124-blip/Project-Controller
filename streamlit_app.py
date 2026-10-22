@@ -710,8 +710,8 @@ PERFORMANCE_ASPECTS = [
 
 
 # =========================================================
-# SIDEBAR
-# =========================================================with st.sidebar:
+# SIDEBAR# =========================================================
+with st.sidebar:
     st.markdown("### Project Manager")
 
     if st.session_state.projects:
