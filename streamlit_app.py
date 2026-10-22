@@ -680,18 +680,9 @@ def boq_template_bytes():
 
 
 # =========================================================
-# HELPER S-CURVE VENDOR (template + parser)
+# HELPER S-CURVE VENDOR (template + parser fleksibel)
 # =========================================================
 SCURVE_COLUMNS = ["No", "Uraian Pekerjaan", "Harga (juta Rp)", "Mulai (Minggu)", "Selesai (Minggu)"]
-_SC_ALIASES = {
-    "No": ["no", "nomor"],
-    "Uraian Pekerjaan": ["uraian pekerjaan", "item pekerjaan", "uraian", "pekerjaan",
-                         "deskripsi", "description"],
-    "Harga (juta Rp)": ["harga (juta rp)", "harga (juta rp.)", "harga (juta)", "harga",
-                        "nilai (juta rp)", "nilai"],
-    "Mulai (Minggu)": ["mulai (minggu)", "mulai (m)", "mulai", "start"],
-    "Selesai (Minggu)": ["selesai (minggu)", "selesai (m)", "selesai", "finish", "end"],
-}
 
 
 def scurve_template_bytes(max_week):
@@ -735,19 +726,35 @@ def scurve_template_bytes(max_week):
 
 
 def parse_scurve_file(file, max_week):
-    """Baca & validasi file S-Curve vendor. Return (rows, errors)."""
+    """Baca & validasi file S-Curve vendor dengan nama kolom yang fleksibel."""
     df = _read_upload(file)
+    
+    # 1. Deteksi nama kolom secara fleksibel (case-insensitive & toleransi sinonim)
     colmap = {}
+    aliases = {
+        "Uraian Pekerjaan": ["uraian pekerjaan", "item pekerjaan", "uraian", "pekerjaan", "deskripsi", "description", "nama item", "item", "kegiatan", "aktivitas"],
+        "Harga (juta Rp)": ["harga (juta rp)", "harga (juta)", "harga", "nilai (juta rp)", "nilai", "biaya", "amount", "price", "total harga"],
+        "Mulai (Minggu)": ["mulai (minggu)", "mulai", "start", "awal", "minggu mulai", "waktu mulai", "start week"],
+        "Selesai (Minggu)": ["selesai (minggu)", "selesai", "finish", "end", "akhir", "minggu selesai", "waktu selesai", "end week"],
+        "No": ["no", "nomor", "no.", "id", "urut"]
+    }
+    
     for j, c in enumerate(df.columns):
         key = _norm_text(c)
-        for target, aliases in _SC_ALIASES.items():
-            if key in aliases and target not in colmap:
-                colmap[target] = j
-                break
-    missing = [t for t in SCURVE_COLUMNS if t != "No" and t not in colmap]
+        # Hilangkan tanda baca seperti titik dua, kurung, dll saat mencocokkan
+        key_clean = re.sub(r"[^a-z0-9\s]", "", key).strip()
+        
+        for target, alias_list in aliases.items():
+            if target not in colmap:
+                # Cek apakah nama kolom persis sama atau mengandung kata kunci alias
+                if key in alias_list or key_clean in alias_list or any(a in key_clean for a in alias_list if len(a) > 3):
+                    colmap[target] = j
+                    break
+
+    # 2. Validasi: Tolak hanya jika kolom utama benar-benar hilang
+    missing = [t for t in ["Uraian Pekerjaan", "Harga (juta Rp)", "Mulai (Minggu)", "Selesai (Minggu)"] if t not in colmap]
     if missing:
-        return [], ["Kolom tidak ditemukan: " + ", ".join(missing)
-                    + ". Gunakan template yang diberikan dan jangan ubah nama kolom."]
+        return [], [f"Kolom wajib tidak ditemukan: {', '.join(missing)}. Pastikan file Excel memiliki kolom untuk Uraian, Harga, Mulai, dan Selesai."]
 
     def raw(row, name):
         j = colmap.get(name)
@@ -763,33 +770,51 @@ def parse_scurve_file(file, max_week):
     for idx, (_, row) in enumerate(df.iterrows()):
         line = idx + 2  # baris di Excel (baris 1 = header)
         item = raw(row, "Uraian Pekerjaan")
-        h_raw, m_raw, s_raw = raw(row, "Harga (juta Rp)"), raw(row, "Mulai (Minggu)"), raw(row, "Selesai (Minggu)")
+        h_raw = raw(row, "Harga (juta Rp)")
+        m_raw = raw(row, "Mulai (Minggu)")
+        s_raw = raw(row, "Selesai (Minggu)")
+        
+        # Lewati baris kosong
         if not (item or h_raw or m_raw or s_raw):
             continue
-        if item.lower() in ("total", "jumlah", "grand total"):
+            
+        # Lewati baris total/jumlah (biasanya di bagian bawah)
+        if str(item).lower() in ("total", "jumlah", "grand total", "sub total", "subtotal", "total harga"):
             continue
+            
         if not item:
-            errors.append(f"Baris {line}: uraian pekerjaan kosong.")
+            errors.append(f"Baris {line}: Uraian pekerjaan kosong.")
             continue
+            
         harga_v = _to_number(h_raw)
         if harga_v is None or harga_v <= 0:
-            errors.append(f"Baris {line} ({item}): harga harus berupa angka lebih dari 0.")
+            errors.append(f"Baris {line} ({item}): Harga harus berupa angka lebih dari 0.")
             continue
+            
         mulai, selesai = as_int(m_raw), as_int(s_raw)
         if mulai is None or selesai is None:
-            errors.append(f"Baris {line} ({item}): Mulai/Selesai harus bilangan bulat (nomor minggu).")
+            errors.append(f"Baris {line} ({item}): Mulai/Selesai harus berupa angka (nomor minggu).")
             continue
+            
         if mulai < 1 or selesai > max_week:
-            errors.append(f"Baris {line} ({item}): minggu harus antara 1 dan {max_week}.")
+            errors.append(f"Baris {line} ({item}): Minggu harus antara 1 dan {max_week}.")
             continue
+            
         if selesai < mulai:
             errors.append(f"Baris {line} ({item}): Selesai lebih kecil dari Mulai.")
             continue
-        rows.append({"No": raw(row, "No"), "Uraian Pekerjaan": item,
-                     "Harga (juta Rp)": float(harga_v),
-                     "Mulai (Minggu)": mulai, "Selesai (Minggu)": selesai})
+            
+        rows.append({
+            "No": raw(row, "No"), 
+            "Uraian Pekerjaan": item,
+            "Harga (juta Rp)": float(harga_v),
+            "Mulai (Minggu)": mulai, 
+            "Selesai (Minggu)": selesai
+        })
+        
     if not rows and not errors:
-        errors.append("Tidak ada baris data di file.")
+        errors.append("Tidak ada baris data valid di dalam file.")
+        
     return rows, errors
 
 
