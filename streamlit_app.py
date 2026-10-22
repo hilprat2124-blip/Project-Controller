@@ -369,90 +369,111 @@ def vendor_template_bytes():
 
 
 def parse_boq_excel(file):
-    """Baca file Excel/CSV BOQ -> list of dict. Mendukung format RAB kompleks."""
-    # Baca tanpa header terlebih dahulu untuk mendeteksi baris judul
-    df_raw = _read_upload(file)
+    """Baca file Excel/CSV BOQ -> list of dict. Mendukung multi-sheet dan format RAB kompleks."""
+    name = getattr(file, "name", "").lower()
+    all_parsed_items = []
     
-    # 1. Deteksi Baris Header
-    header_idx = None
-    for i, row in df_raw.iterrows():
-        row_str = [str(x).strip().lower() for x in row.values if pd.notna(x)]
-        # Jika baris ini mengandung 'volume', 'satuan', dan 'uraian' / 'deskripsi'
-        if any("volume" in s or "vol" in s for s in row_str) and \
-           any("satuan" in s or "unit" in s for s in row_str) and \
-           any("uraian" in s or "deskripsi" in s or "item" in s or "pekerjaan" in s for s in row_str):
-            header_idx = i
-            break
-            
-    if header_idx is None:
-        # Jika tidak terdeteksi, coba baca standar (baris pertama = header)
-        df = df_raw.copy()
-        df.columns = [str(c).strip() for c in df.columns]
+    if name.endswith(".csv"):
+        # Jika CSV, langsung baca sebagai satu sheet
+        try:
+            df_raw = pd.read_csv(file, dtype=str, header=None)
+        except UnicodeDecodeError:
+            file.seek(0)
+            df_raw = pd.read_csv(file, dtype=str, encoding="latin-1", header=None)
+        sheets = {"CSV": df_raw}
     else:
+        if not HAS_OPENPYXL:
+            raise ValueError("Library 'openpyxl' belum terpasang. Gunakan CSV atau install openpyxl.")
+        try:
+            # Baca semua sheet sekaligus
+            sheets = pd.read_excel(file, sheet_name=None, dtype=str, header=None)
+        except Exception as e:
+            raise ValueError(f"Gagal membaca file Excel: {e}")
+
+    # Iterasi setiap sheet
+    for sheet_name, df_raw in sheets.items():
+        # 1. Deteksi Baris Header
+        header_idx = None
+        for i, row in df_raw.iterrows():
+            row_str = [str(x).strip().lower() for x in row.values if pd.notna(x)]
+            
+            # Cari baris yang memiliki 'volume' DAN 'satuan'/'unit' DAN 'uraian'/'deskripsi'/'pekerjaan'
+            has_vol = any("volume" in s or "vol" in s for s in row_str)
+            has_unit = any("satuan" in s or "unit" in s for s in row_str)
+            has_desc = any("uraian" in s or "deskripsi" in s or "description" in s or "pekerjaan" in s for s in row_str)
+            
+            if has_vol and has_unit and has_desc:
+                header_idx = i
+                break
+                
+        # Jika header tidak ditemukan di sheet ini, lewati sheet ini
+        if header_idx is None:
+            continue
+            
         # Set header ke baris yang terdeteksi
         df = df_raw.iloc[header_idx + 1:].copy()
         df.columns = [str(c).strip() for c in df_raw.iloc[header_idx].values]
-    
-    # 2. Samakan nama kolom (case-insensitive + alias)
-    rename = {}
-    for c in df.columns:
-        key = str(c).strip().lower()
-        # Cek apakah ada di alias
-        if key in BOQ_ALIASES:
-            rename[c] = BOQ_ALIASES[key]
-        else:
-            # Pencocokan parsial (misal: "DESCRIPTION" -> "Item Pekerjaan")
-            for alias, target in BOQ_ALIASES.items():
-                if alias in key:
-                    rename[c] = target
-                    break
-                    
-    df = df.rename(columns=rename)
-
-    # 3. Validasi kolom wajib
-    if "Item Pekerjaan" not in df.columns:
-        # Fallback: cari kolom yang isinya paling banyak teks (kemungkinan besar itu nama pekerjaan)
-        for c in df.columns:
-            if df[c].dtype == object and df[c].astype(str).str.len().mean() > 10:
-                df = df.rename(columns={c: "Item Pekerjaan"})
-                break
         
+        # 2. Samakan nama kolom (case-insensitive + alias)
+        rename = {}
+        for c in df.columns:
+            key = str(c).strip().lower()
+            if key in BOQ_ALIASES:
+                rename[c] = BOQ_ALIASES[key]
+            else:
+                for alias, target in BOQ_ALIASES.items():
+                    if alias in key:
+                        rename[c] = target
+                        break
+                        
+        df = df.rename(columns=rename)
+
+        # 3. Validasi kolom wajib
         if "Item Pekerjaan" not in df.columns:
-            raise ValueError("Kolom 'Item Pekerjaan' atau 'DESCRIPTION' tidak ditemukan.")
+            # Fallback: cari kolom yang isinya paling banyak teks (kemungkinan nama pekerjaan)
+            for c in df.columns:
+                if df[c].dtype == object and df[c].dropna().astype(str).str.len().mean() > 10:
+                    df = df.rename(columns={c: "Item Pekerjaan"})
+                    break
+            
+            if "Item Pekerjaan" not in df.columns:
+                continue # Jika tetap tidak ada, lewati sheet ini
 
-    # Pastikan semua kolom standar ada
-    for col in BOQ_COLUMNS:
-        if col not in df.columns:
-            df[col] = ""
+        # Pastikan semua kolom standar ada
+        for col in BOQ_COLUMNS:
+            if col not in df.columns:
+                df[col] = ""
 
-    # 4. Bersihkan data
-    # Hapus baris yang kosong (tidak ada item pekerjaan DAN tidak ada volume)
-    df = df.dropna(subset=["Item Pekerjaan", "Volume"], how="all")
-    
-    # Isi NaN dengan string kosong
-    df["Item Pekerjaan"] = df["Item Pekerjaan"].fillna("").astype(str).str.strip()
-    df["Spesifikasi"] = df["Spesifikasi"].fillna("").astype(str).str.strip()
-    
-    # Format Volume & Satuan
-    df["Volume"] = df["Volume"].apply(_clean_volume)
-    df["Satuan"] = df["Satuan"].fillna("").astype(str).str.strip().replace("nan", "")
-    
-    # Filter: Hanya ambil baris yang memiliki nama pekerjaan
-    df = df[df["Item Pekerjaan"].str.len() > 0]
-    
-    if df.empty:
-        raise ValueError("Tidak ada baris data yang valid di file. Pastikan ada nama pekerjaan.")
+        # 4. Bersihkan data
+        df = df.dropna(subset=["Item Pekerjaan", "Volume"], how="all")
+        
+        # Isi NaN dengan string kosong dan rapikan
+        df["Item Pekerjaan"] = df["Item Pekerjaan"].fillna("").astype(str).str.strip()
+        df["Spesifikasi"] = df["Spesifikasi"].fillna("").astype(str).str.strip()
+        df["Volume"] = df["Volume"].apply(_clean_volume)
+        df["Satuan"] = df["Satuan"].fillna("").astype(str).str.strip().replace("nan", "")
+        
+        # Filter: Hanya ambil baris yang memiliki nama pekerjaan
+        df = df[df["Item Pekerjaan"].str.len() > 0]
+        
+        # Normalisasi Kompleksitas
+        df["Kompleksitas"] = df["Kompleksitas"].apply(_norm_complexity)
+        
+        # Tambahkan ke list global
+        if not df.empty:
+            all_parsed_items.extend(df.to_dict("records"))
 
-    # 5. Normalisasi & Penomoran
-    df["Kompleksitas"] = df["Kompleksitas"].apply(_norm_complexity)
-    
-    # Nomor otomatis urut
-    df["No"] = range(1, len(df) + 1)
-    
+    if not all_parsed_items:
+        raise ValueError("Tidak ada data BOQ yang bisa dibaca. Pastikan file memiliki tabel dengan kolom Uraian/Deskripsi, Volume, dan Satuan.")
+
+    # 5. Penomoran Ulang untuk semua item
+    for i, item in enumerate(all_parsed_items, start=1):
+        item["No"] = i
+        
     # Ambil hanya kolom standar
-    df = df[BOQ_COLUMNS]
+    final_items = [{k: item.get(k, "") for k in BOQ_COLUMNS} for item in all_parsed_items]
     
-    return df.to_dict("records")
+    return final_items
 
 
 def boq_template_bytes():
