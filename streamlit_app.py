@@ -3,6 +3,7 @@ import re
 import csv
 import html
 import json
+import base64
 import hashlib
 import uuid
 from datetime import datetime, date, time
@@ -680,7 +681,8 @@ def boq_template_bytes():
 
 
 # =========================================================
-# HELPER S-CURVE VENDOR (format baku + parser ketat)
+# HELPER S-CURVE VENDOR
+# (file vendor disimpan apa adanya, tidak dibaca isinya; KPDP yang mengunduh)
 # =========================================================
 SCURVE_FIXED = ["No", "Uraian Pekerjaan", "Harga (juta Rp)", "Bobot (%)"]
 
@@ -691,7 +693,7 @@ def scurve_expected_headers(max_week):
 
 
 def scurve_format_example(max_week):
-    """Contoh tampilan format baku (hanya untuk ditampilkan, bukan untuk diunduh)."""
+    """Contoh format S-Curve (dipakai untuk template yang diunduh vendor)."""
     cols = scurve_expected_headers(max_week)
 
     def row(no, name, harga, bobot, start, vals):
@@ -709,97 +711,54 @@ def scurve_format_example(max_week):
     ], columns=cols)
 
 
-def scurve_row_span(r):
-    """Minggu mulai & selesai sebuah item (dari kolom mingguan M1..Mn)."""
-    if r.get("Mulai (Minggu)") and r.get("Selesai (Minggu)"):  # format lama
-        return int(r["Mulai (Minggu)"]), int(r["Selesai (Minggu)"])
-    ws = []
-    for k, v in r.items():
-        m = re.fullmatch(r"M(\d+)", str(k))
-        if m:
-            try:
-                if float(v or 0) > 0:
-                    ws.append(int(m.group(1)))
-            except (TypeError, ValueError):
-                pass
-    return (min(ws), max(ws)) if ws else (1, 1)
+def scurve_template_bytes(max_week):
+    """Template S-Curve (header baku + contoh) untuk diunduh vendor."""
+    df = scurve_format_example(max_week)
+    if HAS_OPENPYXL:
+        try:
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                df.to_excel(writer, index=False, sheet_name="S-Curve")
+                ws = writer.sheets["S-Curve"]
+                ws.column_dimensions["A"].width = 8
+                ws.column_dimensions["B"].width = 40
+                ws.column_dimensions["C"].width = 18
+                ws.column_dimensions["D"].width = 12
+            return (buf.getvalue(), "template_scurve.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        except Exception:
+            pass
+    return df.to_csv(index=False).encode("utf-8-sig"), "template_scurve.csv", "text/csv"
 
 
-def parse_scurve_file(file, max_week):
-    """Baca & validasi S-Curve vendor. Format harus sama persis dengan format baku.
-    Return (rows, errors)."""
-    df = _read_upload(file)
-    expected = scurve_expected_headers(max_week)
-    got = [re.sub(r"\s+", " ", _cell(c)) for c in df.columns]
-    if got != expected:
-        missing = [h for h in expected if h not in got]
-        extra = [h for h in got if h not in expected]
-        msgs = ["Header kolom tidak sama persis dengan format baku."]
-        if missing:
-            msgs.append("Kolom kurang: " + ", ".join(missing[:10]) + (" ..." if len(missing) > 10 else ""))
-        if extra:
-            msgs.append("Kolom tidak dikenal: " + ", ".join(extra[:10]) + (" ..." if len(extra) > 10 else ""))
-        if not missing and not extra:
-            msgs.append("Urutan kolom berbeda dari format baku.")
-        return [], msgs
+_MIME_BY_EXT = {
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xls": "application/vnd.ms-excel",
+    ".csv": "text/csv",
+}
 
-    rows, errors = [], []
-    for idx, (_, row) in enumerate(df.iterrows()):
-        line = idx + 2  # baris di Excel (baris 1 = header)
-        vals = [_cell(row.iloc[j]) for j in range(len(expected))]
-        if not any(vals):
-            continue
-        no, item, h_raw, b_raw = vals[:4]
-        low = item.lower()
-        if low in ("total", "jumlah", "grand total") or low.startswith("progress"):
-            continue
-        if not item:
-            errors.append(f"Baris {line}: uraian pekerjaan kosong.")
-            continue
-        harga_v = _to_number(h_raw)
-        if harga_v is None or harga_v <= 0:
-            errors.append(f"Baris {line} ({item}): Harga harus angka lebih dari 0.")
-            continue
-        bobot_v = _to_number(b_raw)
-        if bobot_v is None or bobot_v <= 0 or bobot_v > 100:
-            errors.append(f"Baris {line} ({item}): Bobot (%) harus angka antara 0 dan 100.")
-            continue
-        weekly, bad = [], False
-        for w, s in enumerate(vals[4:], start=1):
-            if s in ("", "-", "–", "—"):
-                weekly.append(0.0)
-                continue
-            n = _to_number(s)
-            if n is None or n < 0:
-                errors.append(f"Baris {line} ({item}): kolom M{w} bukan angka yang valid.")
-                bad = True
-                break
-            weekly.append(float(n))
-        if bad:
-            continue
-        if sum(weekly) <= 0:
-            errors.append(f"Baris {line} ({item}): tidak ada progress mingguan.")
-            continue
-        if abs(sum(weekly) - bobot_v) > 0.1:
-            errors.append(f"Baris {line} ({item}): jumlah M1..M{max_week} ({sum(weekly):.2f}) "
-                          f"tidak sama dengan Bobot ({bobot_v:.2f}).")
-            continue
-        r = {"No": no, "Uraian Pekerjaan": item,
-             "Harga (juta Rp)": float(harga_v), "Bobot (%)": float(bobot_v)}
-        for w, v in enumerate(weekly, start=1):
-            r[f"M{w}"] = round(v, 4)
-        rows.append(r)
 
-    if not rows and not errors:
-        errors.append("Tidak ada baris data di file.")
-    if rows and not errors:
-        total = sum(r["Harga (juta Rp)"] for r in rows)
-        for r in rows:
-            exp_b = r["Harga (juta Rp)"] / total * 100
-            if abs(exp_b - r["Bobot (%)"]) > 0.1:
-                errors.append(f"{r['Uraian Pekerjaan']}: Bobot {r['Bobot (%)']:.2f}% tidak sesuai "
-                              f"Harga / Total Harga ({exp_b:.2f}%).")
-    return (rows if not errors else []), errors
+def _guess_mime(filename):
+    fn = (filename or "").lower()
+    for ext, mime in _MIME_BY_EXT.items():
+        if fn.endswith(ext):
+            return mime
+    return "application/octet-stream"
+
+
+def scurve_file_from_row(row):
+    """Ambil (bytes, filename, mime) dari baris tabel scurve, atau None."""
+    if not row:
+        return None
+    d = row.get("data")
+    if isinstance(d, dict) and d.get("file_b64"):
+        try:
+            raw = base64.b64decode(d["file_b64"])
+        except Exception:
+            return None
+        fn = row.get("filename") or "s_curve"
+        return raw, fn, d.get("mime") or _guess_mime(fn)
+    return None
 
 
 # =========================================================
@@ -964,6 +923,7 @@ def persist():
 
 def delete_project_db(pid):
     for t, col in (("appointments", "project_id"), ("penawaran", "project_id"),
+                   ("scurve", "project_id"),
                    ("project_vendors", "project_id"), ("project_public", "id"),
                    ("projects", "id")):
         try:
@@ -1147,51 +1107,45 @@ def vendor_page(email):
         with t4:
             st.markdown("### Upload S-Curve (Wajib)")
             max_week = max(1, (int(pub.get("deadline") or 0) + 6) // 7)
-            st.info(f"Anda terpilih sebagai kontraktor project ini. Wajib upload S-Curve memakai "
-                    f"template dari KPDP. Durasi project {pub.get('deadline')} hari "
-                    f"(maksimal minggu ke-{max_week}).")
+            st.info(f"Anda terpilih sebagai kontraktor project ini. Wajib upload S-Curve. "
+                    f"Durasi project {pub.get('deadline')} hari (maksimal minggu ke-{max_week}). "
+                    f"File yang Anda upload akan langsung diteruskan ke KPDP apa adanya.")
 
             tpl_bytes, tpl_name, tpl_mime = scurve_template_bytes(max_week)
-            st.download_button("Unduh Template S-Curve", data=tpl_bytes, file_name=tpl_name,
-                               mime=tpl_mime, key=f"tpl_sc_{pid_sel}")
+            st.download_button("Unduh Contoh Template S-Curve", data=tpl_bytes,
+                               file_name=tpl_name, mime=tpl_mime, key=f"tpl_sc_{pid_sel}")
 
             sc_cur = fetch_scurve(pid_sel, email)
             if sc_cur:
                 st.success(f"S-Curve terakhir diupload: {fmt_ts(sc_cur.get('uploaded_at'))} · "
-                           f"file {sc_cur.get('filename') or '-'} · "
-                           f"total {format_rupiah(sc_cur.get('total_harga') or 0)}")
-                with st.expander("Lihat S-Curve yang sudah diupload"):
-                    st.dataframe(pd.DataFrame(sc_cur.get("data") or []),
-                                 use_container_width=True, hide_index=True)
+                           f"file {sc_cur.get('filename') or '-'}")
             else:
                 st.warning("Belum ada S-Curve yang diupload.")
 
-            sc_types = ["xlsx", "xls", "csv"] if HAS_OPENPYXL else ["csv"]
+            sc_types = ["xlsx", "xls", "csv"]
             sc_file = st.file_uploader(
                 "Upload S-Curve (" + " / ".join("." + t for t in sc_types) + ")",
                 type=sc_types, key=f"sc_upload_{pid_sel}",
             )
             if sc_file is not None:
-                try:
-                    sc_rows, sc_errors = parse_scurve_file(sc_file, max_week)
-                except Exception as e:
-                    sc_rows, sc_errors = [], [f"File tidak bisa dibaca: {e}"]
-
-                if sc_errors:
-                    st.error("Format file belum sesuai template:\n\n"
-                             + "\n".join(f"- {x}" for x in sc_errors[:20]))
+                raw = sc_file.getvalue()
+                size_kb = len(raw) / 1024
+                if len(raw) > 5 * 1024 * 1024:
+                    st.error("Ukuran file maksimal 5 MB.")
                 else:
-                    sc_total = sum(r["Harga (juta Rp)"] for r in sc_rows)
-                    st.success(f"Terbaca {len(sc_rows)} item pekerjaan, total {format_rupiah(sc_total)}. Preview:")
-                    st.dataframe(pd.DataFrame(sc_rows, columns=SCURVE_COLUMNS),
-                                 use_container_width=True, hide_index=True)
+                    st.success(f"File siap dikirim: {sc_file.name} ({size_kb:,.0f} KB)")
                     if st.button("Kirim S-Curve", type="primary", key=f"sc_send_{pid_sel}"):
                         try:
                             db().table("scurve").upsert({
                                 "project_id": pid_sel, "vendor_email": email,
                                 "vendor_name": vendor_name,
-                                "filename": getattr(sc_file, "name", ""),
-                                "data": sc_rows, "total_harga": float(sc_total),
+                                "filename": sc_file.name,
+                                "data": {
+                                    "file_b64": base64.b64encode(raw).decode("ascii"),
+                                    "mime": _guess_mime(sc_file.name),
+                                    "size": len(raw),
+                                },
+                                "total_harga": 0.0,
                                 "uploaded_at": datetime.utcnow().isoformat() + "Z",
                             }, on_conflict="project_id,vendor_email").execute()
                             st.toast("S-Curve terkirim ke KPDP.")
@@ -2142,9 +2096,9 @@ elif step == 3:
     st.markdown("## Tahap 3 — Site Execution")
     st.markdown(
         "<div class='flow-hint'>"
-        "Isi tabel WBS item pekerjaan — tiap item punya harga, bobot, dan rentang minggu. "
-        "Sistem akan hitung distribusi bobot per minggu, total per minggu, dan progress kumulatif "
-        "dalam format tabel seperti Excel, plus grafik S-Curve."
+        "Unduh S-Curve yang diupload vendor, lalu isi tabel WBS item pekerjaan — tiap item punya harga, "
+        "bobot, dan rentang minggu. Sistem akan hitung distribusi bobot per minggu, total per minggu, "
+        "dan progress kumulatif dalam format tabel seperti Excel, plus grafik S-Curve."
         "</div>",
         unsafe_allow_html=True,
     )
@@ -2163,27 +2117,16 @@ elif step == 3:
     elif not sc_sub:
         st.warning("Vendor terpilih belum mengupload S-Curve.")
     else:
-        sc_data = sc_sub.get("data") or []
-        total_sc = float(sc_sub.get("total_harga") or 0)
+        sc_file_info = scurve_file_from_row(sc_sub)
         st.success(f"S-Curve sudah diupload {fmt_ts(sc_sub.get('uploaded_at'))} · "
-                   f"file {sc_sub.get('filename') or '-'} · {len(sc_data)} item · "
-                   f"total {format_rupiah(total_sc)}")
-        if final_cost and abs(total_sc - float(final_cost)) > 0.005 * float(final_cost):
-            st.warning(f"Total S-Curve vendor ({format_rupiah(total_sc)}) berbeda dari "
-                       f"nilai kontrak ({format_rupiah(final_cost)}).")
-        with st.expander("Lihat S-Curve dari vendor"):
-            st.dataframe(pd.DataFrame(sc_data), use_container_width=True, hide_index=True)
-        if st.button("Pakai S-Curve Vendor sebagai WBS", key=f"use_sc_{pid}"):
-            active["wbs_data"] = [{
-                "No": r.get("No", ""),
-                "Item Pekerjaan": r.get("Uraian Pekerjaan", ""),
-                "Harga (juta Rp)": float(r.get("Harga (juta Rp)") or 0),
-                "Mulai": int(r.get("Mulai (Minggu)") or 1),
-                "Selesai": int(r.get("Selesai (Minggu)") or 1),
-                "Realisasi (%)": 0.0,
-            } for r in sc_data]
-            active["wbs_ver"] = int(active.get("wbs_ver", 0)) + 1
-            rerun()
+                   f"file {sc_sub.get('filename') or '-'}")
+        if sc_file_info:
+            sc_bytes, sc_fname, sc_mime = sc_file_info
+            st.download_button("Unduh S-Curve dari Vendor", data=sc_bytes,
+                               file_name=sc_fname, mime=sc_mime, key=f"dl_sc_{pid}")
+        else:
+            st.warning("File S-Curve tidak bisa dibaca (kemungkinan data lama dengan format berbeda). "
+                       "Minta vendor upload ulang.")
 
     st.markdown("### Tabel Rencana Kerja (WBS)")
 
