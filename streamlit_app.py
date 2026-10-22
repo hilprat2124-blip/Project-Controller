@@ -269,10 +269,11 @@ def solve_vendor_lp(vendor_names, costs, budget, scores=None,
 BOQ_COLUMNS = ["No", "Item Pekerjaan", "Volume", "Satuan", "Spesifikasi", "Kompleksitas"]
 
 BOQ_ALIASES = {
-    "no": "No", "nomor": "No",
+    "no": "No", "nomor": "No", "nomor item": "No",
     "item pekerjaan": "Item Pekerjaan", "item": "Item Pekerjaan",
     "uraian pekerjaan": "Item Pekerjaan", "uraian": "Item Pekerjaan",
     "pekerjaan": "Item Pekerjaan", "deskripsi": "Item Pekerjaan",
+    "description": "Item Pekerjaan", "nama pekerjaan": "Item Pekerjaan",
     "volume": "Volume", "vol": "Volume", "qty": "Volume", "kuantitas": "Volume",
     "satuan": "Satuan", "sat": "Satuan", "unit": "Satuan", "uom": "Satuan",
     "spesifikasi": "Spesifikasi", "spek": "Spesifikasi", "specification": "Spesifikasi",
@@ -368,58 +369,139 @@ def vendor_template_bytes():
 
 
 def parse_boq_excel(file):
-    """Baca file Excel/CSV BOQ -> list of dict. Raise ValueError jika format salah."""
-    df = _read_upload(file)
-
-    # samakan nama kolom (case-insensitive + alias)
+    """Baca file Excel/CSV BOQ -> list of dict. Mendukung format RAB kompleks."""
+    # Baca tanpa header terlebih dahulu untuk mendeteksi baris judul
+    df_raw = _read_upload(file)
+    
+    # 1. Deteksi Baris Header
+    header_idx = None
+    for i, row in df_raw.iterrows():
+        row_str = [str(x).strip().lower() for x in row.values if pd.notna(x)]
+        # Jika baris ini mengandung 'volume', 'satuan', dan 'uraian' / 'deskripsi'
+        if any("volume" in s or "vol" in s for s in row_str) and \
+           any("satuan" in s or "unit" in s for s in row_str) and \
+           any("uraian" in s or "deskripsi" in s or "item" in s or "pekerjaan" in s for s in row_str):
+            header_idx = i
+            break
+            
+    if header_idx is None:
+        # Jika tidak terdeteksi, coba baca standar (baris pertama = header)
+        df = df_raw.copy()
+        df.columns = [str(c).strip() for c in df.columns]
+    else:
+        # Set header ke baris yang terdeteksi
+        df = df_raw.iloc[header_idx + 1:].copy()
+        df.columns = [str(c).strip() for c in df_raw.iloc[header_idx].values]
+    
+    # 2. Samakan nama kolom (case-insensitive + alias)
     rename = {}
     for c in df.columns:
         key = str(c).strip().lower()
+        # Cek apakah ada di alias
         if key in BOQ_ALIASES:
             rename[c] = BOQ_ALIASES[key]
+        else:
+            # Pencocokan parsial (misal: "DESCRIPTION" -> "Item Pekerjaan")
+            for alias, target in BOQ_ALIASES.items():
+                if alias in key:
+                    rename[c] = target
+                    break
+                    
     df = df.rename(columns=rename)
 
+    # 3. Validasi kolom wajib
     if "Item Pekerjaan" not in df.columns:
-        raise ValueError(
-            "Kolom 'Item Pekerjaan' tidak ditemukan. "
-            "Gunakan template yang disediakan."
-        )
+        # Fallback: cari kolom yang isinya paling banyak teks (kemungkinan besar itu nama pekerjaan)
+        for c in df.columns:
+            if df[c].dtype == object and df[c].astype(str).str.len().mean() > 10:
+                df = df.rename(columns={c: "Item Pekerjaan"})
+                break
+        
+        if "Item Pekerjaan" not in df.columns:
+            raise ValueError("Kolom 'Item Pekerjaan' atau 'DESCRIPTION' tidak ditemukan.")
 
+    # Pastikan semua kolom standar ada
     for col in BOQ_COLUMNS:
         if col not in df.columns:
             df[col] = ""
 
-    df = df[BOQ_COLUMNS].copy()
-    df = df[df["Item Pekerjaan"].notna() & (df["Item Pekerjaan"].astype(str).str.strip() != "")]
-    if df.empty:
-        raise ValueError("Tidak ada baris data yang valid di file.")
-
-    df["Item Pekerjaan"] = df["Item Pekerjaan"].astype(str).str.strip()
+    # 4. Bersihkan data
+    # Hapus baris yang kosong (tidak ada item pekerjaan DAN tidak ada volume)
+    df = df.dropna(subset=["Item Pekerjaan", "Volume"], how="all")
+    
+    # Isi NaN dengan string kosong
+    df["Item Pekerjaan"] = df["Item Pekerjaan"].fillna("").astype(str).str.strip()
+    df["Spesifikasi"] = df["Spesifikasi"].fillna("").astype(str).str.strip()
+    
+    # Format Volume & Satuan
     df["Volume"] = df["Volume"].apply(_clean_volume)
-    for col in ["Satuan", "Spesifikasi"]:
-        df[col] = df[col].fillna("").astype(str).str.strip().replace("nan", "")
+    df["Satuan"] = df["Satuan"].fillna("").astype(str).str.strip().replace("nan", "")
+    
+    # Filter: Hanya ambil baris yang memiliki nama pekerjaan
+    df = df[df["Item Pekerjaan"].str.len() > 0]
+    
+    if df.empty:
+        raise ValueError("Tidak ada baris data yang valid di file. Pastikan ada nama pekerjaan.")
+
+    # 5. Normalisasi & Penomoran
     df["Kompleksitas"] = df["Kompleksitas"].apply(_norm_complexity)
-    df["No"] = range(1, len(df) + 1)  # nomor otomatis urut
+    
+    # Nomor otomatis urut
+    df["No"] = range(1, len(df) + 1)
+    
+    # Ambil hanya kolom standar
+    df = df[BOQ_COLUMNS]
+    
     return df.to_dict("records")
 
 
 def boq_template_bytes():
-    """Return (data, filename, mime). Fallback ke CSV jika openpyxl tidak ada."""
+    """Return (data, filename, mime) template RAB sesuai standar Excel."""
+    # Membuat DataFrame template yang menyerupai format RAB R.05
+    template_data = [
+        {"No": 1, "Item Pekerjaan": "BAB I. PEKERJAAN PENDAHULUAN", "Volume": "", "Satuan": "", "Spesifikasi": "", "Kompleksitas": "Rendah"},
+        {"No": 2, "Item Pekerjaan": "Mobilisasi dan Demobilisasi", "Volume": "1", "Satuan": "ls", "Spesifikasi": "", "Kompleksitas": "Rendah"},
+        {"No": 3, "Item Pekerjaan": "Site Management Proyek", "Volume": "1", "Satuan": "ls", "Spesifikasi": "", "Kompleksitas": "Sedang"},
+        {"No": 4, "Item Pekerjaan": "BAB II. BANGUNAN OFFICE", "Volume": "", "Satuan": "", "Spesifikasi": "", "Kompleksitas": "Rendah"},
+        {"No": 5, "Item Pekerjaan": "II.1 PEKERJAAN STRUKTUR", "Volume": "", "Satuan": "", "Spesifikasi": "", "Kompleksitas": "Rendah"},
+        {"No": 6, "Item Pekerjaan": "Pekerjaan Pondasi Footplate (FP1)", "Volume": "5.5", "Satuan": "m³", "Spesifikasi": "Beton K-300", "Kompleksitas": "Tinggi"},
+        {"No": 7, "Item Pekerjaan": "Pembesian Footplate", "Volume": "1560.75", "Satuan": "kg", "Spesifikasi": "BJTS U42", "Kompleksitas": "Tinggi"},
+        {"No": 8, "Item Pekerjaan": "Pekerjaan Kolom K1", "Volume": "5.47", "Satuan": "m³", "Spesifikasi": "Beton K-300", "Kompleksitas": "Tinggi"},
+        {"No": 9, "Item Pekerjaan": "II.2 PEKERJAAN ARSITEKTUR", "Volume": "", "Satuan": "", "Spesifikasi": "", "Kompleksitas": "Rendah"},
+        {"No": 10, "Item Pekerjaan": "Pek. Pasangan Dinding Bata Ringan", "Volume": "251.64", "Satuan": "m²", "Spesifikasi": "Tebal 10 cm", "Kompleksitas": "Sedang"},
+        {"No": 11, "Item Pekerjaan": "Pek. Plasteran", "Volume": "398.11", "Satuan": "m²", "Spesifikasi": "Mortar MU-302", "Kompleksitas": "Sedang"},
+        {"No": 12, "Item Pekerjaan": "BAB III. CALIBRATION ROOM", "Volume": "", "Satuan": "", "Spesifikasi": "", "Kompleksitas": "Rendah"},
+        {"No": 13, "Item Pekerjaan": "III.1 PEKERJAAN STRUKTUR", "Volume": "", "Satuan": "", "Spesifikasi": "", "Kompleksitas": "Rendah"},
+        {"No": 14, "Item Pekerjaan": "Pekerjaan GWT (Ground Water Tank)", "Volume": "3.03", "Satuan": "m³", "Spesifikasi": "Beton K-300", "Kompleksitas": "Tinggi"}
+    ]
+    df = pd.DataFrame(template_data)
+    
     if HAS_OPENPYXL:
         try:
             buf = io.BytesIO()
             with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                default_items().to_excel(writer, index=False, sheet_name="BOQ")
+                df.to_excel(writer, index=False, sheet_name="Template BOQ")
+                
+                # Atur lebar kolom agar rapi saat dibuka di Excel
+                worksheet = writer.sheets["Template BOQ"]
+                worksheet.column_dimensions['A'].width = 5
+                worksheet.column_dimensions['B'].width = 50
+                worksheet.column_dimensions['C'].width = 10
+                worksheet.column_dimensions['D'].width = 10
+                worksheet.column_dimensions['E'].width = 30
+                worksheet.column_dimensions['F'].width = 15
+                
             return (
                 buf.getvalue(),
-                "template_boq.xlsx",
+                "template_boq_rab.xlsx",
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
         except Exception:
             pass
+            
     return (
-        default_items().to_csv(index=False).encode("utf-8-sig"),
-        "template_boq.csv",
+        df.to_csv(index=False).encode("utf-8-sig"),
+        "template_boq_rab.csv",
         "text/csv",
     )
 
