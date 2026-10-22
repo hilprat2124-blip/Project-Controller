@@ -680,6 +680,120 @@ def boq_template_bytes():
 
 
 # =========================================================
+# HELPER S-CURVE VENDOR (template + parser)
+# =========================================================
+SCURVE_COLUMNS = ["No", "Uraian Pekerjaan", "Harga (juta Rp)", "Mulai (Minggu)", "Selesai (Minggu)"]
+_SC_ALIASES = {
+    "No": ["no", "nomor"],
+    "Uraian Pekerjaan": ["uraian pekerjaan", "item pekerjaan", "uraian", "pekerjaan",
+                         "deskripsi", "description"],
+    "Harga (juta Rp)": ["harga (juta rp)", "harga (juta rp.)", "harga (juta)", "harga",
+                        "nilai (juta rp)", "nilai"],
+    "Mulai (Minggu)": ["mulai (minggu)", "mulai (m)", "mulai", "start"],
+    "Selesai (Minggu)": ["selesai (minggu)", "selesai (m)", "selesai", "finish", "end"],
+}
+
+
+def scurve_template_bytes(max_week):
+    """Template S-Curve yang harus diisi vendor terpilih."""
+    mw = max(1, int(max_week))
+    spans = [("A", "Pekerjaan Persiapan", 0.0, 0.2),
+             ("B", "Pekerjaan Struktur", 0.15, 0.6),
+             ("C", "Pekerjaan Arsitektur", 0.5, 0.9),
+             ("D", "Pekerjaan Finishing", 0.8, 1.0)]
+    rows = []
+    for no, name, a, b in spans:
+        s = max(1, int(round(a * mw)))
+        e = max(s, min(mw, int(round(b * mw))))
+        rows.append({"No": no, "Uraian Pekerjaan": name, "Harga (juta Rp)": None,
+                     "Mulai (Minggu)": s, "Selesai (Minggu)": e})
+    df = pd.DataFrame(rows, columns=SCURVE_COLUMNS)
+    guide = pd.DataFrame({"Petunjuk": [
+        "1. Isi sheet 'S-Curve'. Jangan ubah nama kolom di baris pertama.",
+        "2. Hapus/ubah baris contoh, lalu isi semua item pekerjaan Anda.",
+        "3. Harga (juta Rp): nilai tiap item dalam juta rupiah, harus lebih dari 0.",
+        f"4. Mulai/Selesai: nomor minggu (bilangan bulat), antara 1 dan {mw}.",
+        "5. Selesai tidak boleh lebih kecil dari Mulai.",
+        "6. Total harga seluruh item sebaiknya sama dengan nilai kontrak (SPK).",
+        "7. Simpan sebagai .xlsx lalu upload di Portal Vendor.",
+    ]})
+    if HAS_OPENPYXL:
+        try:
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                df.to_excel(writer, index=False, sheet_name="S-Curve")
+                guide.to_excel(writer, index=False, sheet_name="Petunjuk")
+                ws = writer.sheets["S-Curve"]
+                for col, w in zip("ABCDE", (8, 42, 18, 16, 16)):
+                    ws.column_dimensions[col].width = w
+                writer.sheets["Petunjuk"].column_dimensions["A"].width = 90
+            return (buf.getvalue(), "template_scurve.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        except Exception:
+            pass
+    return df.to_csv(index=False).encode("utf-8-sig"), "template_scurve.csv", "text/csv"
+
+
+def parse_scurve_file(file, max_week):
+    """Baca & validasi file S-Curve vendor. Return (rows, errors)."""
+    df = _read_upload(file)
+    colmap = {}
+    for j, c in enumerate(df.columns):
+        key = _norm_text(c)
+        for target, aliases in _SC_ALIASES.items():
+            if key in aliases and target not in colmap:
+                colmap[target] = j
+                break
+    missing = [t for t in SCURVE_COLUMNS if t != "No" and t not in colmap]
+    if missing:
+        return [], ["Kolom tidak ditemukan: " + ", ".join(missing)
+                    + ". Gunakan template yang diberikan dan jangan ubah nama kolom."]
+
+    def raw(row, name):
+        j = colmap.get(name)
+        return _cell(row.iloc[j]) if j is not None else ""
+
+    def as_int(s):
+        n = _to_number(s)
+        if n is None or abs(n - round(n)) > 1e-9:
+            return None
+        return int(round(n))
+
+    rows, errors = [], []
+    for idx, (_, row) in enumerate(df.iterrows()):
+        line = idx + 2  # baris di Excel (baris 1 = header)
+        item = raw(row, "Uraian Pekerjaan")
+        h_raw, m_raw, s_raw = raw(row, "Harga (juta Rp)"), raw(row, "Mulai (Minggu)"), raw(row, "Selesai (Minggu)")
+        if not (item or h_raw or m_raw or s_raw):
+            continue
+        if item.lower() in ("total", "jumlah", "grand total"):
+            continue
+        if not item:
+            errors.append(f"Baris {line}: uraian pekerjaan kosong.")
+            continue
+        harga_v = _to_number(h_raw)
+        if harga_v is None or harga_v <= 0:
+            errors.append(f"Baris {line} ({item}): harga harus berupa angka lebih dari 0.")
+            continue
+        mulai, selesai = as_int(m_raw), as_int(s_raw)
+        if mulai is None or selesai is None:
+            errors.append(f"Baris {line} ({item}): Mulai/Selesai harus bilangan bulat (nomor minggu).")
+            continue
+        if mulai < 1 or selesai > max_week:
+            errors.append(f"Baris {line} ({item}): minggu harus antara 1 dan {max_week}.")
+            continue
+        if selesai < mulai:
+            errors.append(f"Baris {line} ({item}): Selesai lebih kecil dari Mulai.")
+            continue
+        rows.append({"No": raw(row, "No"), "Uraian Pekerjaan": item,
+                     "Harga (juta Rp)": float(harga_v),
+                     "Mulai (Minggu)": mulai, "Selesai (Minggu)": selesai})
+    if not rows and not errors:
+        errors.append("Tidak ada baris data di file.")
+    return rows, errors
+
+
+# =========================================================
 # SUPABASE: CLIENT & AUTH
 # =========================================================
 def get_client():
@@ -813,9 +927,12 @@ def save_project(pid):
             "updated_at": datetime.utcnow().isoformat() + "Z",
         }).execute()
         # versi publik untuk vendor (TANPA budget / RAB)
+        vs_ = (data.get("live_data") or {}).get("vendor_selection") or {}
+        sel_email_ = str(vs_.get("selected_vendor_email") or "").lower() or None
         db().table("project_public").upsert({
             "id": pid, "name": m.get("name"), "client": m.get("client"),
             "location": m.get("location"), "deadline": int(m.get("deadline", 0)),
+            "selected_vendor_email": sel_email_,
             "boq": data.get("items_data") or [],
             "updated_at": datetime.utcnow().isoformat() + "Z",
         }).execute()
@@ -866,6 +983,19 @@ def fetch_appointments(pid, vendor_email=None):
     except Exception as e:
         st.error(f"Gagal membaca appointment: {e}")
         return []
+
+
+def fetch_scurve(pid, vendor_email):
+    """Return baris S-Curve terakhir dari vendor, atau None."""
+    if not vendor_email:
+        return None
+    try:
+        rows = db().table("scurve").select("*").eq("project_id", pid) \
+            .eq("vendor_email", str(vendor_email).lower()).execute().data or []
+    except Exception as e:
+        st.error(f"Gagal membaca S-Curve: {e}")
+        return None
+    return rows[0] if rows else None
 
 
 # Helper agar data tersimpan sebelum rerun / stop
@@ -933,7 +1063,13 @@ def vendor_page(email):
     st.caption(f"{pub['name']} · {pub.get('client') or '-'} · {pub.get('location') or '-'} · "
                f"Deadline: {pub.get('deadline')} hari · Terdaftar sebagai: {vendor_name}")
 
-    t1, t2, t3 = st.tabs(["1. BOQ Project", "2. Kirim Penawaran", "3. Jadwal Klarifikasi"])
+    is_selected = str(pub.get("selected_vendor_email") or "").lower() == email.lower()
+    tab_labels = ["1. BOQ Project", "2. Kirim Penawaran", "3. Jadwal Klarifikasi"]
+    if is_selected:
+        tab_labels.append("4. Upload S-Curve")
+    tabs_v = st.tabs(tab_labels)
+    t1, t2, t3 = tabs_v[0], tabs_v[1], tabs_v[2]
+    t4 = tabs_v[3] if is_selected else None
 
     with t1:
         boq = pub.get("boq") or []
@@ -954,6 +1090,13 @@ def vendor_page(email):
         cur = ex[0] if ex else {}
         # Durasi ditetapkan KPDP (deadline project), vendor tidak bisa mengubah
         durasi = int(pub.get("deadline") or 0)
+        # Harga terkunci begitu KPDP menjadwalkan klarifikasi (selama tidak dibatalkan)
+        my_appts = [a for a in fetch_appointments(pid_sel, email)
+                    if a.get("status") != "Dibatalkan"]
+        locked = len(my_appts) > 0
+        if locked:
+            st.warning("KPDP sudah menjadwalkan klarifikasi untuk Anda, jadi penawaran "
+                       "dikunci dan tidak bisa diubah lagi.")
         if cur:
             st.success(f"Penawaran terakhir dikirim: {fmt_ts(cur.get('updated_at'))} "
                        f"({format_rupiah(cur.get('harga_rab', 0))}, {durasi} hari). "
@@ -963,15 +1106,18 @@ def vendor_page(email):
         with c1:
             harga = st.number_input("Penawaran Harga (juta Rp)", min_value=0.0, step=5.0,
                                     value=float(cur.get("harga_rab") or 0.0),
-                                    key=f"v_harga_{pid_sel}")
+                                    disabled=locked, key=f"v_harga_{pid_sel}")
         with c2:
             st.number_input("Durasi (hari) — ditetapkan KPDP", value=durasi,
                             disabled=True, key=f"v_dur_{pid_sel}_{durasi}")
         catatan = st.text_area("Catatan", value=cur.get("catatan") or "", height=100,
-                               key=f"v_cat_{pid_sel}")
+                               disabled=locked, key=f"v_cat_{pid_sel}")
 
-        if st.button("Kirim Penawaran", type="primary", key=f"v_send_{pid_sel}"):
-            if harga <= 0:
+        if st.button("Kirim Penawaran", type="primary", disabled=locked,
+                     key=f"v_send_{pid_sel}"):
+            if locked:
+                st.error("Penawaran sudah dikunci oleh KPDP.")
+            elif harga <= 0:
                 st.error("Harga penawaran harus lebih dari 0.")
             else:
                 try:
@@ -987,6 +1133,62 @@ def vendor_page(email):
 
     with t3:
         vendor_appointments_live(pid_sel, email)
+
+    if t4 is not None:
+        with t4:
+            st.markdown("### Upload S-Curve (Wajib)")
+            max_week = max(1, (int(pub.get("deadline") or 0) + 6) // 7)
+            st.info(f"Anda terpilih sebagai kontraktor project ini. Wajib upload S-Curve memakai "
+                    f"template dari KPDP. Durasi project {pub.get('deadline')} hari "
+                    f"(maksimal minggu ke-{max_week}).")
+
+            tpl_bytes, tpl_name, tpl_mime = scurve_template_bytes(max_week)
+            st.download_button("Unduh Template S-Curve", data=tpl_bytes, file_name=tpl_name,
+                               mime=tpl_mime, key=f"tpl_sc_{pid_sel}")
+
+            sc_cur = fetch_scurve(pid_sel, email)
+            if sc_cur:
+                st.success(f"S-Curve terakhir diupload: {fmt_ts(sc_cur.get('uploaded_at'))} · "
+                           f"file {sc_cur.get('filename') or '-'} · "
+                           f"total {format_rupiah(sc_cur.get('total_harga') or 0)}")
+                with st.expander("Lihat S-Curve yang sudah diupload"):
+                    st.dataframe(pd.DataFrame(sc_cur.get("data") or []),
+                                 use_container_width=True, hide_index=True)
+            else:
+                st.warning("Belum ada S-Curve yang diupload.")
+
+            sc_types = ["xlsx", "xls", "csv"] if HAS_OPENPYXL else ["csv"]
+            sc_file = st.file_uploader(
+                "Upload S-Curve (" + " / ".join("." + t for t in sc_types) + ")",
+                type=sc_types, key=f"sc_upload_{pid_sel}",
+            )
+            if sc_file is not None:
+                try:
+                    sc_rows, sc_errors = parse_scurve_file(sc_file, max_week)
+                except Exception as e:
+                    sc_rows, sc_errors = [], [f"File tidak bisa dibaca: {e}"]
+
+                if sc_errors:
+                    st.error("Format file belum sesuai template:\n\n"
+                             + "\n".join(f"- {x}" for x in sc_errors[:20]))
+                else:
+                    sc_total = sum(r["Harga (juta Rp)"] for r in sc_rows)
+                    st.success(f"Terbaca {len(sc_rows)} item pekerjaan, total {format_rupiah(sc_total)}. Preview:")
+                    st.dataframe(pd.DataFrame(sc_rows, columns=SCURVE_COLUMNS),
+                                 use_container_width=True, hide_index=True)
+                    if st.button("Kirim S-Curve", type="primary", key=f"sc_send_{pid_sel}"):
+                        try:
+                            db().table("scurve").upsert({
+                                "project_id": pid_sel, "vendor_email": email,
+                                "vendor_name": vendor_name,
+                                "filename": getattr(sc_file, "name", ""),
+                                "data": sc_rows, "total_harga": float(sc_total),
+                                "uploaded_at": datetime.utcnow().isoformat() + "Z",
+                            }, on_conflict="project_id,vendor_email").execute()
+                            st.toast("S-Curve terkirim ke KPDP.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Gagal mengirim S-Curve: {e}")
 
 
 # =========================================================
@@ -1944,6 +2146,36 @@ elif step == 3:
 
     st.caption(f"Kontraktor: {selected_vendor} · Nilai kontrak: {format_rupiah(final_cost)}")
 
+    st.markdown("### S-Curve dari Vendor")
+    sel_email_v = vs.get("selected_vendor_email", "")
+    sc_sub = fetch_scurve(pid, sel_email_v) if sel_email_v else None
+    if not sel_email_v:
+        st.info("Email vendor terpilih belum tersimpan, jadi S-Curve vendor tidak bisa dicari.")
+    elif not sc_sub:
+        st.warning("Vendor terpilih belum mengupload S-Curve.")
+    else:
+        sc_data = sc_sub.get("data") or []
+        total_sc = float(sc_sub.get("total_harga") or 0)
+        st.success(f"S-Curve sudah diupload {fmt_ts(sc_sub.get('uploaded_at'))} · "
+                   f"file {sc_sub.get('filename') or '-'} · {len(sc_data)} item · "
+                   f"total {format_rupiah(total_sc)}")
+        if final_cost and abs(total_sc - float(final_cost)) > 0.005 * float(final_cost):
+            st.warning(f"Total S-Curve vendor ({format_rupiah(total_sc)}) berbeda dari "
+                       f"nilai kontrak ({format_rupiah(final_cost)}).")
+        with st.expander("Lihat S-Curve dari vendor"):
+            st.dataframe(pd.DataFrame(sc_data), use_container_width=True, hide_index=True)
+        if st.button("Pakai S-Curve Vendor sebagai WBS", key=f"use_sc_{pid}"):
+            active["wbs_data"] = [{
+                "No": r.get("No", ""),
+                "Item Pekerjaan": r.get("Uraian Pekerjaan", ""),
+                "Harga (juta Rp)": float(r.get("Harga (juta Rp)") or 0),
+                "Mulai": int(r.get("Mulai (Minggu)") or 1),
+                "Selesai": int(r.get("Selesai (Minggu)") or 1),
+                "Realisasi (%)": 0.0,
+            } for r in sc_data]
+            active["wbs_ver"] = int(active.get("wbs_ver", 0)) + 1
+            rerun()
+
     st.markdown("### Tabel Rencana Kerja (WBS)")
 
     if active.get("wbs_data") is None:
@@ -1952,7 +2184,7 @@ elif step == 3:
     wbs_df = pd.DataFrame(active["wbs_data"], columns=WBS_COLUMNS)
     wbs_raw = st.data_editor(
         wbs_df, use_container_width=True, hide_index=True, num_rows="dynamic",
-        key=f"wbs_editor_{pid}",
+        key=f"wbs_editor_{pid}_{active.get('wbs_ver', 0)}",
         column_config={
             "No": st.column_config.TextColumn("No", width="small", help="Nomor/abjad urut (A, B, C atau 1, 2, 3)"),
             "Item Pekerjaan": st.column_config.TextColumn("Uraian Pekerjaan", required=True, width="large"),
