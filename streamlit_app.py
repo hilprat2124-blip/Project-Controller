@@ -7,6 +7,7 @@ import base64
 import hashlib
 import uuid
 from datetime import datetime, date, time
+from zoneinfo import ZoneInfo
 
 import streamlit as st
 
@@ -126,12 +127,29 @@ def sigmoid_kernel(t, k=4.0):
     return 0.5 * (1 + np.tanh(k * (t - 0.5)))
 
 
+def user_tz():
+    """Zona waktu browser pengguna (otomatis). Fallback ke Asia/Jakarta."""
+    try:
+        tz = st.context.timezone
+        if tz:
+            ZoneInfo(tz)  # validasi
+            return tz
+    except Exception:
+        pass
+    return "Asia/Jakarta"
+
+
+def now_local():
+    """Waktu sekarang sesuai zona waktu pengguna (bukan zona waktu server)."""
+    return datetime.now(ZoneInfo(user_tz()))
+
+
 def fmt_ts(ts):
-    """Format timestamp ISO (UTC) dari database ke WIB."""
+    """Format timestamp ISO (UTC) dari database ke zona waktu pengguna."""
     if not ts:
         return "-"
     try:
-        return pd.to_datetime(ts).tz_convert("Asia/Jakarta").strftime("%d %b %Y %H:%M:%S")
+        return pd.to_datetime(ts).tz_convert(user_tz()).strftime("%d %b %Y %H:%M:%S")
     except Exception:
         return str(ts)[:19].replace("T", " ")
 
@@ -1409,7 +1427,7 @@ def vendor_appointments_live(pid, email):
             st.markdown(f"**Peserta vendor:** {a.get('vendor_participants') or '-'}")
             if a.get("hasil"):
                 st.markdown(f"**Hasil klarifikasi:** {a['hasil']}")
-    st.caption(f"Diperbarui otomatis · {datetime.now():%H:%M:%S}")
+    st.caption(f"Diperbarui otomatis · {now_local():%H:%M:%S}")
 
 
 def vendor_page(email):
@@ -1706,7 +1724,7 @@ def live_penawaran(pid, invited, deadline_days):
         })
     c1, c2 = st.columns(2)
     c1.metric("Vendor sudah mengirim", f"{sent} dari {len(invited)}")
-    c2.metric("Diperbarui", datetime.now().strftime("%H:%M:%S"))
+    c2.metric("Diperbarui", now_local().strftime("%H:%M:%S"))
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
     no_email = [v["Vendor"] for v in invited if not v.get("Email")]
     if no_email:
@@ -1766,7 +1784,7 @@ def live_ranking(pid, invited, budget, deadline_days):
         })
 
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-    st.caption(f"Diurutkan otomatis dari harga terendah · diperbarui {datetime.now():%H:%M:%S}")
+    st.caption(f"Diurutkan otomatis dari harga terendah · diperbarui {now_local():%H:%M:%S}")
 
 
 # =========================================================
