@@ -67,6 +67,8 @@ st.markdown("""
     .pill-warn { background: #fef3c7; color: #92400e; }
     .pill-fail { background: #fee2e2; color: #991b1b; }
     .pill-info { background: #dbeafe; color: #1e40af; }
+    .pill-gold { background: #fde68a; color: #92400e; }
+    .pill-idle { background: #f3f4f6; color: #6b7280; }
     [data-testid="stMetricDelta"] svg { display: none; }
     .step-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; font-size: 0.85rem; }
     .step-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
@@ -103,6 +105,59 @@ st.markdown("""
     .sc-table tr.total-row td { background: #fef3c7; font-weight: 600; }
     .sc-table tr.cum-row td { background: #dbeafe; font-weight: 600; }
     .sc-table tr.actual-cum-row td { background: #fecaca; font-weight: 600; }
+
+    /* ---------- TABEL BIDDING LIVE ---------- */
+    .bid-wrap { overflow-x: auto; border: 1px solid #e5e7eb; border-radius: 8px; background: #ffffff; }
+    .bid-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    .bid-table th {
+        text-align: left; color: #6b7280; font-weight: 500; padding: 10px 12px;
+        border-bottom: 1px solid #e5e7eb; white-space: nowrap; background: #fafafa;
+    }
+    .bid-table td { padding: 10px 12px; border-bottom: 1px solid #f3f4f6; color: #1f2937; vertical-align: middle; }
+    .bid-table tr:last-child td { border-bottom: none; }
+    .bid-table th.num, .bid-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    .bid-table td.rank { width: 76px; white-space: nowrap; }
+    .bid-table tr.bid-lead td { background: #fffbeb; }
+    .bid-table tr.bid-lead td:first-child { box-shadow: inset 4px 0 0 #f59e0b; }
+    .bid-table tr.bid-wait td { color: #9ca3af; }
+    .bid-sub { display: block; font-size: 0.72rem; color: #9ca3af; }
+    .rank-badge {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 26px; height: 26px; border-radius: 50%;
+        font-size: 0.78rem; font-weight: 700; background: #f3f4f6; color: #4b5563;
+    }
+    .rank-1 { background: #f59e0b; color: #ffffff; }
+    .rank-2 { background: #9ca3af; color: #ffffff; }
+    .rank-3 { background: #b45309; color: #ffffff; }
+    .bid-arrow { font-size: 0.7rem; font-weight: 700; margin-left: 6px; }
+    .bid-arrow.up { color: #047857; }
+    .bid-arrow.down { color: #b91c1c; }
+    .bid-tag { animation: bid-pulse 2.4s ease-in-out infinite; }
+
+    @keyframes bid-from-below {
+        from { opacity: 0; transform: translateY(22px); background: #d1fae5; }
+        to   { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes bid-from-above {
+        from { opacity: 0; transform: translateY(-22px); background: #fee2e2; }
+        to   { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes bid-fade-in {
+        from { opacity: 0; transform: translateY(10px); }
+        to   { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes bid-flash {
+        0%   { background-color: #fde68a; }
+        100% { background-color: transparent; }
+    }
+    @keyframes bid-pulse {
+        0%, 100% { transform: scale(1); opacity: 1; }
+        50%      { transform: scale(1.06); opacity: 0.8; }
+    }
+    .bid-table tr.bid-in-up { animation: bid-from-below 0.7s ease-out both; }
+    .bid-table tr.bid-in-down { animation: bid-from-above 0.7s ease-out both; }
+    .bid-table tr.bid-in-new { animation: bid-fade-in 0.55s ease-out both; }
+    .bid-table tr.bid-flash td.price { animation: bid-flash 1.8s ease-out; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -1847,31 +1902,124 @@ def default_wbs():
 
 
 # =========================================================
-# LIVE: PENAWARAN VENDOR (auto-refresh tiap 3 detik)
+# LIVE: PENAWARAN VENDOR — SISTEM BIDDING
+# Urut otomatis dari harga TERENDAH, auto-refresh tiap 3 detik.
+# Baris yang naik/turun peringkat bergerak dengan animasi, harga yang
+# berubah berkedip, dan peringkat 1 ditandai emas.
 # =========================================================
 @st.fragment(run_every=3)
-def live_penawaran(pid, invited, deadline_days):
+def live_penawaran(pid, invited, deadline_days, budget=None):
     pen = fetch_penawaran(pid)
-    rows = []
-    sent = 0
+
+    entries = []
     for v in invited:
         em = (v.get("Email") or "").lower()
-        r = pen.get(em)
-        if r:
-            sent += 1
-        rows.append({
+        r = pen.get(em) if em else None
+        harga_v = float(r["harga_rab"]) if r and r.get("harga_rab") else 0.0
+        entries.append({
             "Vendor": v["Vendor"],
-            "Email": em or "(belum diisi)",
-            "Status": "Sudah mengirim" if r else "Belum mengirim",
-            "Penawaran (juta Rp)": float(r["harga_rab"]) if r else None,
-            "Durasi (hari)": int(deadline_days) if r else None,
-            "Catatan": (r.get("catatan") or "") if r else "",
-            "Update terakhir": fmt_ts(r.get("updated_at")) if r else "-",
+            "Email": em,
+            "harga": harga_v,
+            "catatan": (r.get("catatan") or "") if r else "",
+            "updated": r.get("updated_at") if r else None,
         })
-    c1, c2 = st.columns(2)
-    c1.metric("Vendor sudah mengirim", f"{sent} dari {len(invited)}")
-    c2.metric("Diperbarui", now_local().strftime("%H:%M:%S"))
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    # termurah di atas; kalau harga sama, yang kirim lebih dulu di atas
+    sudah = sorted([e for e in entries if e["harga"] > 0],
+                   key=lambda e: (e["harga"], str(e["updated"] or "")))
+    belum = [e for e in entries if e["harga"] <= 0]
+
+    low = sudah[0]["harga"] if sudah else 0.0
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Vendor sudah mengirim", f"{len(sudah)} dari {len(invited)}")
+    c2.metric("Penawaran terendah", format_rupiah(low) if sudah else "-")
+    c3.metric("Diperbarui", now_local().strftime("%H:%M:%S"))
+
+    # posisi sebelumnya (untuk animasi naik / turun)
+    state_key = f"bid_prev_{pid}"
+    prev = st.session_state.get(state_key)  # None = tampilan pertama
+    cur = {}
+
+    rows_html = []
+    for i, e in enumerate(sudah, start=1):
+        name = e["Vendor"]
+        cur[name] = {"rank": i, "harga": e["harga"]}
+
+        cls, arrow, style = [], "", ""
+        if prev is None or name not in prev:
+            cls.append("bid-in-new")
+            style = f' style="animation-delay:{(i - 1) * 70}ms"'
+        else:
+            old = prev[name]
+            if old["rank"] > i:
+                cls.append("bid-in-up")
+                arrow = f'<span class="bid-arrow up">▲ {old["rank"] - i}</span>'
+            elif old["rank"] < i:
+                cls.append("bid-in-down")
+                arrow = f'<span class="bid-arrow down">▼ {i - old["rank"]}</span>'
+            if abs(old["harga"] - e["harga"]) > 1e-9:
+                cls.append("bid-flash")
+        if i == 1:
+            cls.append("bid-lead")
+
+        over = budget is not None and e["harga"] > float(budget)
+        if over:
+            status = "<span class='pill pill-fail'>Melebihi budget</span>"
+        elif i == 1:
+            status = "<span class='pill pill-gold bid-tag'>Terendah</span>"
+        else:
+            status = "<span class='pill pill-ok'>Sudah mengirim</span>"
+
+        if i == 1:
+            selisih = "-"
+        else:
+            diff = e["harga"] - low
+            pct = diff / low * 100 if low else 0.0
+            selisih = f"+{html.escape(format_rupiah(diff))}<span class='bid-sub'>+{pct:.1f}%</span>"
+
+        rank_cls = f"rank-{i}" if i <= 3 else ""
+        rows_html.append(
+            f"<tr class='{' '.join(cls)}'{style}>"
+            f"<td class='rank'><span class='rank-badge {rank_cls}'>{i}</span>{arrow}</td>"
+            f"<td><b>{html.escape(name)}</b></td>"
+            f"<td>{html.escape(e['Email']) or '-'}</td>"
+            f"<td>{status}</td>"
+            f"<td class='num price'><b>{e['harga']:,.2f}</b>"
+            f"<span class='bid-sub'>{html.escape(format_rupiah(e['harga']))}</span></td>"
+            f"<td class='num'>{selisih}</td>"
+            f"<td class='num'>{int(deadline_days)}</td>"
+            f"<td>{html.escape(e['catatan']) or '-'}</td>"
+            f"<td>{html.escape(fmt_ts(e['updated']))}</td>"
+            f"</tr>"
+        )
+
+    for e in belum:
+        email_txt = html.escape(e["Email"]) if e["Email"] else "(belum diisi)"
+        rows_html.append(
+            f"<tr class='bid-wait'>"
+            f"<td class='rank'><span class='rank-badge'>-</span></td>"
+            f"<td>{html.escape(e['Vendor'])}</td>"
+            f"<td>{email_txt}</td>"
+            f"<td><span class='pill pill-idle'>Belum mengirim</span></td>"
+            f"<td class='num'>-</td><td class='num'>-</td><td class='num'>-</td>"
+            f"<td>-</td><td>-</td>"
+            f"</tr>"
+        )
+
+    st.session_state[state_key] = cur
+
+    table_html = (
+        "<div class='bid-wrap'><table class='bid-table'><thead><tr>"
+        "<th>Rank</th><th>Vendor</th><th>Email</th><th>Status</th>"
+        "<th class='num'>Penawaran (juta Rp)</th><th class='num'>Selisih dari terendah</th>"
+        "<th class='num'>Durasi (hari)</th><th>Catatan</th><th>Update terakhir</th>"
+        "</tr></thead><tbody>" + "".join(rows_html) + "</tbody></table></div>"
+    )
+    st.markdown(table_html, unsafe_allow_html=True)
+    st.caption("Diurutkan otomatis dari penawaran terendah. Vendor yang naik peringkat ditandai ▲ hijau, "
+               "yang turun ▼ merah, dan harga yang baru berubah berkedip kuning.")
+
     no_email = [v["Vendor"] for v in invited if not v.get("Email")]
     if no_email:
         st.warning("Vendor berikut belum punya email, jadi belum bisa login/mengisi penawaran: "
@@ -2420,13 +2568,14 @@ elif step == 2:
     # ---------- 2. PENAWARAN MASUK (LIVE) ----------
     with sub2:
         st.markdown("### Penawaran Masuk dari Vendor")
-        st.caption("Tabel ini **update otomatis tiap 3 detik** saat vendor mengirim / mengubah penawaran "
-                   "dari portal vendor. Tidak perlu refresh halaman.")
+        st.caption("Tabel ini **update otomatis tiap 3 detik** dan **terurut dari penawaran terendah**. "
+                   "Saat vendor mengirim / mengubah penawaran, barisnya pindah peringkat dengan animasi. "
+                   "Tidak perlu refresh halaman.")
         if not invited:
             st.warning("Belum ada vendor diundang.")
         else:
             save_project(pid)  # pastikan undangan vendor sudah di database
-            live_penawaran(pid, invited, deadline)
+            live_penawaran(pid, invited, deadline, budget)
 
     # ---------- 3. APPOINTMENT ----------
     with sub3:
