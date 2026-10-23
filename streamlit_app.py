@@ -1172,9 +1172,36 @@ def do_logout():
     st.rerun()
 
 
+def handle_email_confirmation():
+    """Tangani klik link konfirmasi email dari Supabase (?token_hash=...&type=signup)."""
+    qp = st.query_params
+    token_hash = qp.get("token_hash")
+    typ = qp.get("type")
+    if token_hash and typ in ("signup", "email"):
+        try:
+            get_client().auth.verify_otp({"token_hash": token_hash, "type": typ})
+            try:
+                get_client().auth.sign_out()  # user tetap login manual
+            except Exception:
+                pass
+            st.session_state.just_confirmed = True
+            st.session_state.pop("confirm_failed", None)
+        except Exception:
+            # link sudah dipakai / kedaluwarsa
+            st.session_state.confirm_failed = True
+            st.session_state.pop("just_confirmed", None)
+        st.query_params.clear()
+
+
 def login_page():
     _, mid, _ = st.columns([1, 1.4, 1])
     with mid:
+        if st.session_state.get("just_confirmed"):
+            st.success("✅ Akun Anda sudah terdaftar dan email terkonfirmasi. "
+                       "Silakan masuk dengan email dan password Anda.")
+        elif st.session_state.get("confirm_failed"):
+            st.warning("Link konfirmasi sudah dipakai atau kedaluwarsa. "
+                       "Jika akun sudah terdaftar, silakan langsung masuk.")
         st.markdown("# Vendor Selection & Project Control")
         st.caption("Masuk dengan email Anda. Email KPDP masuk ke dashboard KPDP, email lain masuk ke portal vendor.")
         tab_login, tab_daftar = st.tabs(["Masuk", "Daftar (Vendor)"])
@@ -1190,6 +1217,8 @@ def login_page():
                         res = get_client().auth.sign_in_with_password(
                             {"email": email.strip().lower(), "password": pw})
                         st.session_state.user_email = res.user.email.lower()
+                        st.session_state.pop("just_confirmed", None)
+                        st.session_state.pop("confirm_failed", None)
                         st.rerun()
                     except Exception:
                         st.error("Email atau password salah (atau email belum dikonfirmasi).")
@@ -1541,6 +1570,7 @@ if "saved_hash" not in st.session_state:
     st.session_state.saved_hash = {}
 
 if "user_email" not in st.session_state:
+    handle_email_confirmation()
     login_page()
     st.stop()
 
