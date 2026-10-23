@@ -699,6 +699,71 @@ def boq_template_bytes():
 
 
 # =========================================================
+# HELPER BOQ BERHARGA DARI VENDOR
+# =========================================================
+def _id_to_float(v):
+    """Angka format Indonesia ('1.234.567,50') hasil _fmt_price/_fmt_volume -> float."""
+    s = _cell(v)
+    if not s or s in ("-", "–", "—"):
+        return None
+    try:
+        return float(s.replace(".", "").replace(",", "."))
+    except ValueError:
+        return None
+
+
+def boq_priced_summary(items):
+    """Hitung total penawaran (Rp) dari BOQ yang sudah diisi harga vendor.
+    Hanya baris yang punya volume yang dihitung (baris judul/subtotal diabaikan, supaya tidak dobel).
+    Total baris = Total Price kalau ada, selain itu Unit Price x Volume."""
+    total, n_items, n_priced, rows = 0.0, 0, 0, []
+    for it in items:
+        vol = _id_to_float(it.get("Volume"))
+        if vol is None:
+            continue
+        n_items += 1
+        up = _id_to_float(it.get("Unit Price (Rp)"))
+        tp = _id_to_float(it.get("Total Price (Rp)"))
+        if (tp is None or tp == 0) and up:
+            tp = up * vol
+        if tp and tp > 0:
+            n_priced += 1
+            total += tp
+        rows.append({
+            "NO": it.get("No", ""), "DESCRIPTION": it.get("Description", ""),
+            "VOLUME": it.get("Volume", ""), "UNIT": it.get("Unit", ""),
+            "UNIT PRICE (Rp.)": it.get("Unit Price (Rp)", "-"),
+            "TOTAL (Rp.)": _fmt_price(tp) if tp else "-",
+        })
+    return total, n_items, n_priced, rows
+
+
+def vendor_boq_template_bytes(boq):
+    """Template BOQ milik project (item & volume sudah terisi), vendor tinggal isi UNIT PRICE."""
+    rows = []
+    for r in _normalize_items(boq or []):
+        rows.append({
+            "NO": r["No"], "DESCRIPTION": r["Description"],
+            "SPESIFICATION": r["Specification"], "VOLUME": _to_number(r["Volume"]),
+            "UNIT": r["Unit"], "UNIT PRICE (Rp.)": None, "TOTAL PRICE (Rp.)": None,
+        })
+    df = pd.DataFrame(rows)
+    if HAS_OPENPYXL:
+        try:
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                df.to_excel(writer, index=False, sheet_name="BOQ")
+                ws = writer.sheets["BOQ"]
+                for col, w in zip("ABCDEFG", (10, 60, 38, 12, 8, 18, 18)):
+                    ws.column_dimensions[col].width = w
+            return (buf.getvalue(), "BOQ_penawaran.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        except Exception:
+            pass
+    return df.to_csv(index=False).encode("utf-8-sig"), "BOQ_penawaran.csv", "text/csv"
+
+
+# =========================================================
 # HELPER S-CURVE VENDOR
 # (file vendor disimpan apa adanya, tidak dibaca isinya; KPDP yang mengunduh)
 # =========================================================
@@ -1464,6 +1529,11 @@ def vendor_page(email):
                f"Deadline: {pub.get('deadline')} hari · Terdaftar sebagai: {vendor_name}")
 
     is_selected = str(pub.get("selected_vendor_email") or "").lower() == email.lower()
+    # Harga terkunci begitu KPDP menjadwalkan klarifikasi (selama tidak dibatalkan)
+    my_appts = [a for a in fetch_appointments(pid_sel, email)
+                if a.get("status") != "Dibatalkan"]
+    locked = len(my_appts) > 0
+    harga_key = f"v_harga_{pid_sel}"
     tab_labels = ["1. BOQ Project", "2. Kirim Penawaran", "3. Jadwal Klarifikasi"]
     if is_selected:
         tab_labels.append("4. Upload S-Curve")
@@ -1481,6 +1551,53 @@ def vendor_page(email):
         else:
             st.info("BOQ belum tersedia.")
 
+        st.markdown("---")
+        st.markdown("### Isi Harga lewat Excel")
+        st.caption("Unduh BOQ, isi kolom **UNIT PRICE (Rp.)** di Excel, lalu upload kembali. "
+                   "Total penawaran dihitung otomatis dan langsung masuk ke tab Kirim Penawaran.")
+        if locked:
+            st.warning("Penawaran sudah dikunci oleh KPDP, jadi harga tidak bisa diubah lagi.")
+        elif not boq:
+            st.info("BOQ belum tersedia dari KPDP.")
+        else:
+            bt_data, bt_name, bt_mime = vendor_boq_template_bytes(boq)
+            st.download_button("Unduh BOQ untuk Diisi Harga", data=bt_data, file_name=bt_name,
+                               mime=bt_mime, key=f"v_boq_tpl_{pid_sel}")
+            vb_types = ["xlsx", "xls", "csv"] if HAS_OPENPYXL else ["csv"]
+            vb_file = st.file_uploader(
+                "Upload BOQ yang sudah diisi harga (" + " / ".join("." + t for t in vb_types) + ")",
+                type=vb_types, key=f"v_boq_up_{pid_sel}",
+            )
+            if vb_file is not None:
+                try:
+                    parsed_v = parse_boq_excel(vb_file)
+                    tot_rp, n_items, n_priced, prev_rows = boq_priced_summary(parsed_v)
+                    if n_priced == 0:
+                        st.error("Belum ada harga yang terbaca. Pastikan kolom UNIT PRICE (Rp.) "
+                                 "atau TOTAL PRICE (Rp.) sudah diisi.")
+                    else:
+                        tot_juta = round(tot_rp / 1_000_000, 2)
+                        m1, m2, m3 = st.columns(3)
+                        m1.metric("Item berharga", f"{n_priced} dari {n_items}")
+                        m2.metric("Total (Rp)", _id_number(round(tot_rp), 0))
+                        m3.metric("Total penawaran", format_rupiah(tot_juta))
+                        if n_priced < n_items:
+                            st.warning(f"{n_items - n_priced} item belum diberi harga dan belum ikut "
+                                       "dihitung.")
+                        if n_items != sum(1 for b in _normalize_items(boq) if b["Volume"]):
+                            st.warning("Jumlah item berbeda dari BOQ KPDP. Pastikan Anda tidak "
+                                       "menambah atau menghapus baris.")
+                        st.dataframe(pd.DataFrame(prev_rows), use_container_width=True,
+                                     hide_index=True, height=360)
+                        if st.button("Pakai Total ini sebagai Penawaran", type="primary",
+                                     key=f"v_boq_apply_{pid_sel}"):
+                            st.session_state[harga_key] = float(tot_juta)
+                            st.session_state[f"v_boq_src_{pid_sel}"] = vb_file.name
+                            st.success(f"Total {format_rupiah(tot_juta)} sudah diisi ke tab "
+                                       "**2. Kirim Penawaran**. Buka tab itu lalu klik Kirim Penawaran.")
+                except Exception as e:
+                    st.error(f"Gagal membaca file: {e}")
+
     with t2:
         try:
             ex = db().table("penawaran").select("*").eq("project_id", pid_sel) \
@@ -1490,10 +1607,6 @@ def vendor_page(email):
         cur = ex[0] if ex else {}
         # Durasi ditetapkan KPDP (deadline project), vendor tidak bisa mengubah
         durasi = int(pub.get("deadline") or 0)
-        # Harga terkunci begitu KPDP menjadwalkan klarifikasi (selama tidak dibatalkan)
-        my_appts = [a for a in fetch_appointments(pid_sel, email)
-                    if a.get("status") != "Dibatalkan"]
-        locked = len(my_appts) > 0
         if locked:
             st.warning("KPDP sudah menjadwalkan klarifikasi untuk Anda, jadi penawaran "
                        "dikunci dan tidak bisa diubah lagi.")
@@ -1504,9 +1617,13 @@ def vendor_page(email):
 
         c1, c2 = st.columns(2)
         with c1:
-            harga = st.number_input("Penawaran Harga (juta Rp)", min_value=0.0, step=5.0,
-                                    value=float(cur.get("harga_rab") or 0.0),
-                                    disabled=locked, key=f"v_harga_{pid_sel}")
+            kw = {}
+            if harga_key not in st.session_state:
+                kw["value"] = float(cur.get("harga_rab") or 0.0)
+            harga = st.number_input("Penawaran Harga (juta Rp)", min_value=0.0, step=0.01,
+                                    format="%.2f", disabled=locked, key=harga_key, **kw)
+            if st.session_state.get(f"v_boq_src_{pid_sel}"):
+                st.caption(f"Terisi otomatis dari BOQ: {st.session_state[f'v_boq_src_{pid_sel}']}")
         with c2:
             st.number_input("Durasi (hari) — ditetapkan KPDP", value=durasi,
                             disabled=True, key=f"v_dur_{pid_sel}_{durasi}")
