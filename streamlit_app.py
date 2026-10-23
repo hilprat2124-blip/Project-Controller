@@ -1409,6 +1409,14 @@ def _hash(obj):
 
 def _fill_defaults(p):
     p.setdefault("meta", {})
+    m = p["meta"]
+    # --- Migrasi: dulu hanya ada satu "budget" yang dipakai sebagai batas bayar vendor.
+    # Sekarang dipisah:
+    #   client_budget = nilai kontrak yang KPDP terima dari klien
+    #   vendor_budget = batas anggaran pembayaran ke vendor
+    legacy = float(m.get("budget") or 0.0)
+    m.setdefault("client_budget", legacy)
+    m.setdefault("vendor_budget", legacy)
     p.setdefault("live_data", {})
     for k in ("tender", "vendor_selection", "site_execution", "quality_control"):
         p["live_data"].setdefault(k, {})
@@ -1846,13 +1854,17 @@ def prev_step():
     goto_step(st.session_state.step - 1)
 
 
-def create_project(name, client, location, budget, deadline):
+def create_project(name, client, location, client_budget, deadline):
     pid = str(uuid.uuid4())[:8]
     st.session_state.projects[pid] = _fill_defaults({
         "meta": {
             "id": pid, "name": name, "client": client, "location": location,
-            "budget": float(budget), "deadline": int(deadline),
-            "rab_awal": float(budget),
+            # nilai kontrak yang KPDP terima dari klien
+            "client_budget": float(client_budget),
+            # budget bayar vendor: diatur terpisah di Tahap 2 (Vendor Qualification)
+            "vendor_budget": 0.0,
+            "deadline": int(deadline),
+            "rab_awal": float(client_budget),
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         },
     })
@@ -1906,6 +1918,7 @@ def default_wbs():
 # Urut otomatis dari harga TERENDAH, auto-refresh tiap 3 detik.
 # Baris yang naik/turun peringkat bergerak dengan animasi, harga yang
 # berubah berkedip, dan peringkat 1 ditandai emas.
+# `budget` di sini = BUDGET BAYAR VENDOR (bukan nilai kontrak klien).
 # =========================================================
 @st.fragment(run_every=3)
 def live_penawaran(pid, invited, deadline_days, budget=None):
@@ -1963,9 +1976,9 @@ def live_penawaran(pid, invited, deadline_days, budget=None):
         if i == 1:
             cls.append("bid-lead")
 
-        over = budget is not None and e["harga"] > float(budget)
+        over = budget is not None and budget > 0 and e["harga"] > float(budget)
         if over:
-            status = "<span class='pill pill-fail'>Melebihi budget</span>"
+            status = "<span class='pill pill-fail'>Melebihi budget vendor</span>"
         elif i == 1:
             status = "<span class='pill pill-gold bid-tag'>Terendah</span>"
         else:
@@ -2028,6 +2041,7 @@ def live_penawaran(pid, invited, deadline_days, budget=None):
 
 # =========================================================
 # LIVE: RANKING PENAWARAN (urut harga terendah, auto-refresh)
+# `budget` di sini = BUDGET BAYAR VENDOR.
 # =========================================================
 @st.fragment(run_every=3)
 def live_ranking(pid, invited, budget, deadline_days):
@@ -2051,8 +2065,8 @@ def live_ranking(pid, invited, budget, deadline_days):
     rows = []
     low = sudah[0]["harga"] if sudah else 0.0
     for i, d in enumerate(sudah, start=1):
-        if d["harga"] > budget:
-            status = "Melebihi budget"
+        if budget and budget > 0 and d["harga"] > budget:
+            status = "Melebihi budget vendor"
         elif i == 1:
             status = "Terendah"
         else:
@@ -2112,7 +2126,10 @@ with st.sidebar:
     new_name = st.text_input("Nama project", placeholder="Contoh: Piping Area 5B", key="new_name")
     new_client = st.text_input("Klien", placeholder="Contoh: PT Pertamina", key="new_client")
     new_location = st.text_input("Lokasi", placeholder="Contoh: Balikpapan", key="new_location")
-    new_budget = st.number_input("Budget project (juta Rp)", min_value=10.0, value=300.0, step=10.0, key="new_budget")
+    new_budget = st.number_input("Nilai kontrak dari klien (juta Rp)", min_value=10.0, value=300.0,
+                                 step=10.0, key="new_budget",
+                                 help="Uang yang KPDP terima dari klien. Budget bayar vendor diatur "
+                                      "terpisah di Tahap 2 (Vendor Qualification).")
     new_deadline = st.number_input("Deadline project (hari)", min_value=1, value=90, step=5, key="new_deadline")
     if st.button("Tambah Project", key="btn_add_project"):
         if new_name.strip():
@@ -2143,20 +2160,21 @@ with st.sidebar:
         st.caption(f"{done} dari {total} tahap selesai")
 
         st.markdown("---")
-        st.markdown("**Budget & Deadline Project**")
+        st.markdown("**Nilai Klien & Deadline Project**")
         new_budget_edit = st.number_input(
-            "Budget project (juta Rp)", min_value=10.0,
-            value=max(10.0, float(active["meta"]["budget"])),
+            "Nilai kontrak dari klien (juta Rp)", min_value=10.0,
+            value=max(10.0, float(active["meta"].get("client_budget") or 0.0)),
             step=10.0, key=f"edit_budget_{active['meta']['id']}",
+            help="Uang yang KPDP terima dari klien (bukan budget bayar vendor).",
         )
         new_deadline_edit = st.number_input(
             "Deadline project (hari)", min_value=1,
             value=int(active["meta"]["deadline"]),
             step=5, key=f"edit_deadline_{active['meta']['id']}",
         )
-        if (new_budget_edit != active["meta"]["budget"]
+        if (new_budget_edit != active["meta"].get("client_budget")
                 or new_deadline_edit != active["meta"]["deadline"]):
-            active["meta"]["budget"] = float(new_budget_edit)
+            active["meta"]["client_budget"] = float(new_budget_edit)
             active["meta"]["deadline"] = int(new_deadline_edit)
             rerun()
 
@@ -2182,9 +2200,11 @@ with col_title:
     st.markdown("# Vendor Selection & Project Control")
     if active:
         meta = active["meta"]
+        vb_txt = format_rupiah(meta.get("vendor_budget", 0)) if meta.get("vendor_budget") else "belum diatur"
         st.caption(
             f"{meta['name']} · {meta['client']} · {meta['location']} · "
-            f"Budget: {format_rupiah(meta['budget'])} · Deadline: {meta['deadline']} hari"
+            f"Nilai klien: {format_rupiah(meta.get('client_budget', 0))} · "
+            f"Budget vendor: {vb_txt} · Deadline: {meta['deadline']} hari"
         )
     else:
         st.caption("Belum ada project aktif")
@@ -2232,9 +2252,11 @@ if step == 0:
         done, total = project_progress(p)
         summary_rows.append({
             "Project": m["name"], "Klien": m["client"], "Lokasi": m["location"],
-            "Budget": format_rupiah(m["budget"]), "Tahapan": f"{done}/{total}",
+            "Nilai Klien": format_rupiah(m.get("client_budget", 0)),
+            "Budget Vendor": format_rupiah(m["vendor_budget"]) if m.get("vendor_budget") else "-",
+            "Tahapan": f"{done}/{total}",
             "Vendor Terpilih": vs.get("selected_vendor", "-"),
-            "Nilai Kontrak": format_rupiah(vs.get("selected_cost", 0)) if vs.get("selected_cost") else "-",
+            "Nilai Kontrak Vendor": format_rupiah(vs.get("selected_cost", 0)) if vs.get("selected_cost") else "-",
             "Status": status,
         })
 
@@ -2242,8 +2264,8 @@ if step == 0:
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Total project", len(df_summary))
-    total_budget = sum(p["meta"]["budget"] for p in st.session_state.projects.values())
-    c2.metric("Total budget", format_rupiah(total_budget))
+    total_budget = sum(p["meta"].get("client_budget", 0) for p in st.session_state.projects.values())
+    c2.metric("Total nilai kontrak klien", format_rupiah(total_budget))
     c3.metric("Project selesai", int((df_summary["Status"] == "Selesai").sum()))
 
     st.markdown("---")
@@ -2270,7 +2292,8 @@ if active is None:
 
 live_data = active["live_data"]
 meta = active["meta"]
-budget = float(meta["budget"])
+client_budget = float(meta.get("client_budget") or 0.0)   # uang masuk dari klien
+vendor_budget = float(meta.get("vendor_budget") or 0.0)   # batas bayar ke vendor
 deadline = int(meta["deadline"])
 pid = st.session_state.active_project
 
@@ -2337,18 +2360,21 @@ if step == 1:
         with col2:
             st.markdown("#### RAB Awal (Estimasi Kita)")
             st.markdown(
-                f"<div class='hint-box'>Budget project: <b>{format_rupiah(meta['budget'])}</b>.</div>",
+                f"<div class='hint-box'>Nilai kontrak dari klien: <b>{format_rupiah(client_budget)}</b>. "
+                f"Ini uang yang <b>kita terima</b> dari klien. Budget untuk membayar vendor "
+                f"diatur terpisah di Tahap 2 (Vendor Qualification).</div>",
                 unsafe_allow_html=True,
             )
             rab_awal_input = st.number_input(
                 "RAB Estimasi (juta Rp)", min_value=10.0,
-                value=max(10.0, float(meta.get("rab_awal", meta.get("budget", 300.0)))),
+                value=max(10.0, float(meta.get("rab_awal", client_budget or 300.0))),
                 step=10.0, key=f"rab_awal_{meta['id']}",
             )
             budget_input = st.number_input(
-                "Budget approved (juta Rp)", min_value=10.0,
-                value=max(10.0, float(meta.get("budget", 300.0))),
+                "Nilai kontrak disetujui klien (juta Rp)", min_value=10.0,
+                value=max(10.0, float(client_budget or 300.0)),
                 step=10.0, key=f"budget_tender_{meta['id']}",
+                help="Nilai yang dibayarkan klien kepada KPDP.",
             )
             st.metric("Selisih", format_rupiah(budget_input - rab_awal_input))
 
@@ -2444,12 +2470,12 @@ if step == 1:
         if not form_valid:
             st.error("Data belum lengkap.")
         else:
-            meta["budget"] = float(budget_input)
+            meta["client_budget"] = float(budget_input)
             meta["rab_awal"] = float(rab_awal_input)
             payload = {
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "rab_awal": float(rab_awal_input),
-                "budget": float(budget_input),
+                "client_budget": float(budget_input),
                 "variance": float(budget_input - rab_awal_input),
                 "dokumen": [d for d, v in [
                     ("Drawing", doc_drawing), ("RKS", doc_rks),
@@ -2478,11 +2504,33 @@ elif step == 2:
     st.markdown("## Tahap 2 — Vendor Qualification & Selection")
     st.markdown(
         "<div class='flow-hint'>"
-        "Alur: Vendor diundang (pakai email) → vendor login & isi penawaran sendiri → "
+        "Alur: Atur budget bayar vendor → vendor diundang (pakai email) → vendor login & isi penawaran sendiri → "
         "KPDP melihat langsung (realtime) → klarifikasi teknis → optimasi → deal harga & SPK."
         "</div>",
         unsafe_allow_html=True,
     )
+
+    # ---------- BUDGET BAYAR VENDOR (terpisah dari nilai kontrak klien) ----------
+    st.markdown("#### Budget Pembayaran Vendor")
+    bv1, bv2, bv3 = st.columns(3)
+    with bv1:
+        vb_input = st.number_input(
+            "Budget bayar vendor (juta Rp)", min_value=0.0,
+            value=float(meta.get("vendor_budget") or 0.0),
+            step=10.0, key=f"vendor_budget_{meta['id']}",
+            help="Batas maksimal yang boleh dibayarkan KPDP ke vendor. Vendor yang menawar di atas "
+                 "angka ini tidak ikut optimasi. Tidak terlihat oleh vendor.",
+        )
+        meta["vendor_budget"] = float(vb_input)
+        vendor_budget = float(vb_input)
+    bv2.metric("Nilai kontrak dari klien", format_rupiah(client_budget))
+    bv3.metric("Margin KPDP (jika budget vendor terpakai penuh)",
+               format_rupiah(client_budget - vendor_budget))
+    if vendor_budget <= 0:
+        st.warning("Budget bayar vendor belum diatur. Isi dulu supaya optimasi vendor bisa berjalan.")
+    elif vendor_budget > client_budget:
+        st.error("Budget vendor melebihi nilai kontrak dari klien. KPDP akan rugi jika budget ini terpakai penuh.")
+    st.markdown("---")
 
     sub1, sub2, sub3, sub4, sub5 = st.tabs([
         "1. BOQ & Vendor Diundang",
@@ -2575,7 +2623,7 @@ elif step == 2:
             st.warning("Belum ada vendor diundang.")
         else:
             save_project(pid)  # pastikan undangan vendor sudah di database
-            live_penawaran(pid, invited, deadline, budget)
+            live_penawaran(pid, invited, deadline, vendor_budget if vendor_budget > 0 else None)
 
     # ---------- 3. APPOINTMENT ----------
     with sub3:
@@ -2681,6 +2729,8 @@ elif step == 2:
         n_appt = len(fetch_appointments(pid))
 
         prasyarat = []
+        if vendor_budget <= 0:
+            prasyarat.append("budget bayar vendor (diisi di bagian atas Tahap 2)")
         if not invited:
             prasyarat.append("vendor diundang")
         if not any(h > 0 for h in harga.values()):
@@ -2691,23 +2741,24 @@ elif step == 2:
         if prasyarat:
             st.warning("Belum bisa optimasi. Selesaikan: " + ", ".join(prasyarat))
         else:
-            st.caption("Optimasi memilih vendor dengan **penawaran harga terendah** yang masih dalam budget.")
+            st.caption("Optimasi memilih vendor dengan **penawaran harga terendah** yang masih dalam "
+                       "**budget bayar vendor**.")
 
             st.markdown("#### Data untuk Optimasi (Ranking Penawaran)")
-            live_ranking(pid, invited, budget, deadline)
+            live_ranking(pid, invited, vendor_budget, deadline)
 
-            eligible = [n for n in invited_names if harga[n] > 0 and harga[n] <= budget]
+            eligible = [n for n in invited_names if harga[n] > 0 and harga[n] <= vendor_budget]
 
             if not eligible:
-                st.error("Tidak ada vendor yang lolos kriteria.")
+                st.error("Tidak ada vendor yang lolos kriteria (semua penawaran melebihi budget vendor).")
             else:
                 cc1, cc2 = st.columns(2)
-                cc1.metric("Budget", format_rupiah(budget))
+                cc1.metric("Budget vendor", format_rupiah(vendor_budget))
                 cc2.metric("Vendor lolos budget", f"{len(eligible)} dari {len(invited)}")
 
                 st.markdown("---")
                 selected_name, solver_status = solve_vendor_lp(
-                    eligible, {n: harga[n] for n in eligible}, budget, None, 1.0, 0.0
+                    eligible, {n: harga[n] for n in eligible}, vendor_budget, None, 1.0, 0.0
                 )
 
                 if selected_name is None:
@@ -2721,7 +2772,7 @@ elif step == 2:
                     r1.metric("Vendor", selected_name)
                     r2.metric("Harga Penawaran", format_rupiah(selected_cost))
                     r3.metric("Durasi", f"{selected_duration} hari")
-                    r4.metric("Sisa budget", format_rupiah(budget - selected_cost))
+                    r4.metric("Sisa budget vendor", format_rupiah(vendor_budget - selected_cost))
 
                     st.session_state[f"optimized_vendor_{pid}"] = selected_name
                     st.session_state[f"optimized_cost_{pid}"] = selected_cost
@@ -2741,15 +2792,23 @@ elif step == 2:
                 unsafe_allow_html=True,
             )
 
-            c1, c2 = st.columns(2)
+            c1, c2, c3 = st.columns(3)
             with c1:
                 final_price = st.number_input(
-                    "Harga kesepakatan (juta Rp)", min_value=1.0,
+                    "Harga kesepakatan dengan vendor (juta Rp)", min_value=1.0,
                     value=max(1.0, float(optimized_cost)), step=5.0, key=f"fp_{pid}",
                 )
             with c2:
                 saving = optimized_cost - final_price
-                st.metric("Penghematan", format_rupiah(saving))
+                st.metric("Penghematan dari penawaran", format_rupiah(saving))
+            with c3:
+                margin_kpdp = client_budget - final_price
+                st.metric("Margin KPDP (nilai klien − harga vendor)", format_rupiah(margin_kpdp))
+
+            if final_price > vendor_budget:
+                st.warning("Harga kesepakatan melebihi budget bayar vendor.")
+            if final_price > client_budget:
+                st.error("Harga kesepakatan vendor melebihi nilai kontrak dari klien (margin negatif).")
 
             st.markdown("#### SPK")
             c1, c2, c3 = st.columns(3)
@@ -2795,6 +2854,9 @@ elif step == 2:
                         "rab_awal_vendor": float(optimized_cost),
                         "selected_cost": float(final_price),
                         "saving": float(saving),
+                        "vendor_budget": float(vendor_budget),
+                        "client_budget": float(client_budget),
+                        "margin_kpdp": float(client_budget - final_price),
                         "selected_duration": int(durasi_map.get(optimized_vendor, 0)),
                         "spk_number": spk_number,
                         "spk_date": str(spk_date),
@@ -2829,7 +2891,7 @@ elif step == 3:
     selected_vendor = vs.get("selected_vendor", "-")
     final_cost = vs.get("selected_cost", 0)
 
-    st.caption(f"Kontraktor: {selected_vendor} · Nilai kontrak: {format_rupiah(final_cost)}")
+    st.caption(f"Kontraktor: {selected_vendor} · Nilai kontrak vendor: {format_rupiah(final_cost)}")
 
     st.markdown("### S-Curve dari Vendor")
     sel_email_v = vs.get("selected_vendor_email", "")
@@ -3196,7 +3258,8 @@ elif step == 5:
             st.markdown(f"- Nama: {meta['name']}")
             st.markdown(f"- Klien: {meta['client']}")
             st.markdown(f"- Lokasi: {meta['location']}")
-            st.markdown(f"- Budget: {format_rupiah(meta['budget'])}")
+            st.markdown(f"- Nilai kontrak dari klien: {format_rupiah(client_budget)}")
+            st.markdown(f"- Budget bayar vendor: {format_rupiah(vendor_budget)}")
             st.markdown(f"- RAB Awal: {format_rupiah(meta.get('rab_awal', 0))}")
 
         with c2:
@@ -3205,6 +3268,7 @@ elif step == 5:
                 st.markdown(f"- Vendor: {vs.get('selected_vendor', '-')}")
                 st.markdown(f"- SPK: {format_rupiah(vs.get('selected_cost', 0))}")
                 st.markdown(f"- Penghematan: {format_rupiah(vs.get('saving', 0))}")
+                st.markdown(f"- Margin KPDP: {format_rupiah(client_budget - vs.get('selected_cost', 0))}")
             if se:
                 st.markdown(f"- Realisasi: {se.get('actual_pct', 0):.2f}%")
                 st.markdown(f"- SPI: {se.get('spi', 0):.3f}")
