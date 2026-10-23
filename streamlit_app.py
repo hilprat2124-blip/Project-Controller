@@ -1477,6 +1477,34 @@ def stop_app():
 # =========================================================
 # HALAMAN VENDOR
 # =========================================================
+def _vendor_sig(email):
+    """Sidik ringan: project yang mengundang vendor ini + kapan terakhir berubah.
+    None kalau gagal membaca (supaya tidak memicu rerun palsu)."""
+    try:
+        inv = db().table("project_vendors").select("project_id,vendor_name") \
+            .eq("vendor_email", email).execute().data or []
+        ids = [i["project_id"] for i in inv]
+        pubs = []
+        if ids:
+            pubs = db().table("project_public").select("id,updated_at") \
+                .in_("id", ids).execute().data or []
+        return _hash({
+            "inv": sorted([i["project_id"], i.get("vendor_name")] for i in inv),
+            "pub": sorted([p["id"], str(p.get("updated_at"))] for p in pubs),
+        })
+    except Exception:
+        return None
+
+
+@st.fragment(run_every=5)
+def vendor_watch(email, known_sig):
+    """Cek perubahan tiap 5 detik. Kalau ada project baru / BOQ / deadline berubah,
+    seluruh halaman dimuat ulang otomatis. Tidak menampilkan apa pun."""
+    new_sig = _vendor_sig(email)
+    if new_sig is not None and new_sig != known_sig:
+        st.rerun()
+
+
 @st.fragment(run_every=5)
 def vendor_appointments_live(pid, email):
     appts = fetch_appointments(pid, email)
@@ -1498,6 +1526,7 @@ def vendor_appointments_live(pid, email):
 def vendor_page(email):
     st.markdown("# Portal Vendor")
     st.caption(f"Login sebagai {email}")
+    vendor_watch(email, _vendor_sig(email))  # auto-refresh bila ada project baru / perubahan
 
     try:
         inv = db().table("project_vendors").select("project_id,vendor_name") \
